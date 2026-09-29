@@ -1,0 +1,15 @@
+# Secrets
+.env
+.env.*
+*.key
+deployer.json
+hunter.json
+
+# Foundry
+out/
+cache/
+broadcast/
+
+# Node
+node_modules/
+lib/

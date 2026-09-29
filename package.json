@@ -1,0 +1,13 @@
+{
+  "name": "deepwood",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DeepWood - season-based gem-hunting game economy. DeepWood/$DEEPWOOD.",
+  "scripts": {
+    "test:contract": "forge test",
+    "test:engine": "node script/hunt-engine.test.mjs",
+    "test": "npm run test:contract && npm run test:engine",
+    "engine": "node script/hunt-engine.mjs"
+  }
+}
