@@ -23,7 +23,8 @@
  * settleHunt. That is a liveness failure, not a safety one, and it is
  * documented as a real centralisation rather than hidden.
  */
-import { createHash } from 'node:crypto';
+import sha3 from 'js-sha3';
+const { keccak256 } = sha3;
 
 export const RARITY = { COMMON: 0, UNCOMMON: 1, RARE: 2, EPIC: 3, LEGENDARY: 4 };
 export const RARITY_NAME = ['Quartz', 'Amber', 'Sapphire', 'Ruby', 'Diamond'];
@@ -45,7 +46,16 @@ export const PRICE = {
   4: 200_000_000_000_000_000n, // 0.2 ETH    Diamond
 };
 
-const keccakLike = (buf) => createHash('sha256').update(buf).digest();
+/**
+ * REAL keccak256 -- the same function the contract uses.
+ *
+ * This was sha256 in the first version, which was a genuine correctness bug,
+ * not a naming nit: a merkle root built on sha256 can never be verified
+ * onchain, because Ethereum hashes with keccak256. The client engine in
+ * deepwood-app had the same bug. Both now use keccak256 and must stay
+ * byte-identical.
+ */
+const keccakLike = (buf) => new Uint8Array(keccak256.arrayBuffer(buf));
 
 function toBuf32(v) {
   const b = Buffer.alloc(32);

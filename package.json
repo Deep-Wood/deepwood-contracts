@@ -9,5 +9,8 @@
     "test:engine": "node script/hunt-engine.test.mjs",
     "test": "npm run test:contract && npm run test:engine",
     "engine": "node script/hunt-engine.mjs"
+  },
+  "dependencies": {
+    "js-sha3": "^0.9.3"
   }
 }
