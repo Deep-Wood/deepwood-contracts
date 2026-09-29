@@ -173,7 +173,13 @@ export function commitSeason(seasonSeed, plan) {
     for (let i = 0; i < hunts; i++) leaves.push(leafFor(seasonSeed, player, i));
   }
   const root = merkleRoot(leaves);
-  return { root: '0x' + root.toString('hex'), leafCount: leaves.length };
+  // NOTE: merkleRoot() returns a Uint8Array, and a typed array IGNORES the
+  // 'hex' argument to toString(). The previous `'0x' + root.toString('hex')`
+  // therefore produced '0x5,126,44,...' -- comma-joined decimals, not hex.
+  // That string is not a valid bytes32, so every commitment written with it
+  // would have been rejected onchain. Caught by the client/engine parity
+  // check in deepwood-app/src/commitment.test.mjs.
+  return { root: '0x' + Buffer.from(root).toString('hex'), leafCount: leaves.length };
 }
 
 /**
