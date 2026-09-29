@@ -106,22 +106,28 @@ action, not discovered by getting stuck.
 
 ---
 
-## 6. Multiple tools, skill-earned slots
+## 6. Multiple tools - the tier ladder IS the slot system
 
 Players may own several tools and rotate between them, so a tool hitting zero
 mid-season does not halt play.
 
-**Slots are earned by skill, not bought.** Free slot 1; further slots unlock
-through hunting progression. This preserves R1: if slots were purchasable, ETH
-would buy working capital and money would once again predict outcome.
+**The separate slot system was removed, not patched.** There are four tiers,
+each claimable exactly once, and each tier requires owning the one below. That
+alone caps a player at four tools. The original design added an independent
+`MAX_SLOTS` counter, and it was actively harmful: with a base of 1 it locked a
+player out of their own ladder, which the tests caught immediately. The concept
+was redundant and the redundancy caused the bug.
 
 **A shelf of tools is not power.** Each tool carries its own durability pool, so
-owning five tools means five hunts available and five repairs owed. A whale
+owning four tools means four hunts available and four repairs owed. A whale
 banking a shelf of tier-4s has deferred cost, not avoided it. More tools also
 means a larger gem sink, which is where a whale's money *should* go.
 
-Start with 3–4 slots. Enough to feel like rotation, few enough that the shelf
-stays a choice rather than inventory management.
+Rotation is free. Charging for a UI choice would feel like a tax.
+
+**What skill actually raises:** the findable rarity ceiling. Skill 2 opens
+Rare, 3 opens Epic, 4 opens Legendary. A whale with unlimited ETH and no skill
+is still capped at the tool tier's ceiling.
 
 ---
 
@@ -283,11 +289,39 @@ provisional until step 7.
 
 ---
 
-## 14. State of the existing scaffold
+## 14. Build state
 
-`/home/administrator/gem-hunter` holds a working contract and test suite from
-before the design was settled. **It is a reference, not production code** — it
-predates several decisions above and its `redeemGems` path and ROI denominator
-need rework to match this spec. Retained deliberately: the solvency reasoning
-and the drop tables in its tests are the derivation behind §5 and §10, and
-re-deriving them costs a session.
+Steps 1-4 are done and tested. Nothing is deployed; no token exists.
+
+| Step | State |
+|---|---|
+| 1. Contract | `src/DeepWood.sol` - done |
+| 2. Invariant tests | `test/DeepWood.t.sol` - 37/37, grouped by rule |
+| 3. Hunt engine | `script/hunt-engine.mjs` - done, 200k-sample distribution check |
+| 4. Season + leaderboard | In the contract; no off-chain board yet |
+| 5. Tools, repair, rotation | In the contract and tested |
+| 6. Frontend | Not started |
+| 7. Playtest + retune | Blocked on the frontend |
+
+Run `npm test` for both suites.
+
+### Bugs the tests caught
+
+Seven so far, all the same species - plausible code doing something wrong:
+
+1. `claimTool(1)` was repeatable, minting unlimited free tools.
+2. ROI truncated to 0 for any real spend, so the anti-whale test compared
+   zeros. The protection existed in name only.
+3. `maxFindableRarity` capped tier-1 at Common while `dropTable(1)` allows
+   10% Uncommon, so the contract rejected its own table's results.
+4. A skill off-by-one meant Epic was unreachable at skill 3 and Legendary at 4.
+5. Skill unlocks started `false`, so a brand-new player could not find even
+   Common - a dead end, not a difficulty curve.
+6. Fixing (1) with a `MAX_SLOTS` cap locked players out of their own ladder.
+   A regression, caught by my own test.
+7. The merkle leaf omitted the seed, so every seed produced an identical
+   root and `verifySeason` passed for ANY seed - the engine could swap the
+   seed after committing and still match. This was the exact attack the
+   commitment exists to prevent.
+
+Each is now covered by a named regression test.
