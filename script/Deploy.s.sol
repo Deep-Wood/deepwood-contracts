@@ -59,6 +59,8 @@ contract Deploy is Script {
         vm.stopBroadcast();
 
         console.log("DeepWood deployed at:", address(deployed));
-        console.log("season 1 ends at     :", block.timestamp + deployed.SEASON_LENGTH());
+        console.log("owner              :", deployed.owner());
+        (, uint64 seasonLength,, , , , ) = deployed.getConfig();
+        console.log("season 1 ends at   :", block.timestamp + seasonLength);
     }
 }

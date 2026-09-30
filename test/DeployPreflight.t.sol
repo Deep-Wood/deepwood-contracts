@@ -47,7 +47,8 @@ contract DeployPreflightTest is Test {
         assertEq(finalized, false, "season must not be pre-finalized");
         assertLe(startsAt, block.timestamp, "season has already started");
         assertGt(endsAt, block.timestamp, "season is still running");
-        assertEq(endsAt - startsAt, dw.SEASON_LENGTH(), "season is exactly SEASON_LENGTH long");
+        (, uint64 sl, , , , , ) = dw.getConfig();
+        assertEq(endsAt - startsAt, sl, "season is exactly seasonLength long");
     }
 
     /// @notice The 14-day clock starts the INSTANT the contract is deployed.

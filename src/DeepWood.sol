@@ -1,6 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+/// @notice The slice of ERC-20 the game needs: read a balance, push a payment,
+///         pull a funding transfer. No approvals, because the game never
+///         charges a player - it only pays one.
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+
+    function balanceOf(address account) external view returns (uint256);
+
+    function decimals() external view returns (uint8);
+
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+
+    function approve(address spender, uint256 amount) external returns (bool);
+
+    function allowance(address owner, address spender) external view returns (uint256);
+}
+
 /**
  * @title DeepWood
  * @notice Season-based gem-hunting game economy. Ticker $DEEPWOOD.
@@ -63,23 +82,62 @@ contract DeepWood {
     }
 
     // =====================================================================
-    // Constants - the economy
+    // Config - the economy, all of it mutable by the owner
     // =====================================================================
+    //
+    // These were `constant` once, which baked every one of them into the
+    // deployed bytecode permanently: no owner, no pause, no way to add or
+    // remove a rule after launch. They are now storage, seeded with the same
+    // values in the constructor and changeable through setConfig.
+    //
+    // The invariants that must survive ANY retune are enforced in the setter,
+    // not left to discipline:
+    //   - burn fee can never exceed 100% (a >100% fee would mint a negative)
+    //   - season length and cooldown can never be zero (that bricks play)
+    //   - max slots can never fall below base slots (that would strand tools)
+    //   - the splay floor can never be zero (that re-opens the
+    //     one-lucky-hunt-tops-the-board exploit the floor exists to close)
+    //
+    // Everything NOT in this struct stays a constant on purpose. BPS_DENOMINATOR
+    // is a unit, not a policy; changing it would silently rescale every
+    // percentage in the contract at once.
+
+    struct Config {
+        uint256 burnFeeBps; //  5% of every upgrade spend
+        uint64 seasonLength; //  14 days
+        uint64 huntCooldown; //  3 seconds
+        uint256 minSplay; //  0.005 ETH - ROI board entry floor
+        uint64 graduationGrace; //  1 day
+        uint8 baseSlots; //  1
+        uint8 maxSlots; //  4
+    }
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
-    uint256 public constant BURN_FEE_BPS = 500; // 5% of every upgrade spend
 
-    uint64 public constant SEASON_LENGTH = 14 days;
-    uint64 public constant HUNT_COOLDOWN = 3;
-    /// @notice Minimum ETH spend before a player may post to the ROI board.
-    ///         Stops one lucky hunt on a tiny denominator topping the board.
-    uint256 public constant MIN_SPLAY = 0.005 ether;
-    uint64 public constant GRADUATION_GRACE = 1 days;
+    /// @notice Gem prices are quoted in wei (18 decimals). Token redemption
+    ///         pays 1 token per 1 wei of face value, so this is the ratio
+    ///         between the two rails. It is 1, and it stays 1: switching rails
+    ///         must never change what a gem is worth.
+    uint256 public constant PRICE_SCALE = 1;
 
-    /// @notice Base tool slots. Extra slots are EARNED via skill (SPEC §6) -
-    ///         never purchasable, or ETH would buy working capital.
-    uint8 public constant BASE_SLOTS = 1;
-    uint8 public constant MAX_SLOTS = 4;
+    Config public config;
+
+    /// @notice Per-field caps/limits that the owner may not configure away.
+    uint256 public constant MAX_BURN_FEE_BPS = 10_000; // 100%
+    uint64 public constant MAX_SEASON_LENGTH = 365 days;
+    uint64 public constant MAX_HUNT_COOLDOWN = 1 hours;
+    uint64 public constant MAX_GRADUATION_GRACE = 30 days;
+    uint8 public constant HARD_MAX_SLOTS = 16;
+
+    event ConfigUpdated(
+        uint256 burnFeeBps,
+        uint64 seasonLength,
+        uint64 huntCooldown,
+        uint256 minSplay,
+        uint64 graduationGrace,
+        uint8 baseSlots,
+        uint8 maxSlots
+    );
 
     /// @notice Gem price per rarity, in wei. ~8x ladder (SPEC §11: flagged to
     ///         retune to ~4x against real find-rates).
@@ -106,6 +164,25 @@ contract DeepWood {
 
     address public immutable TREASURY;
     address public immutable HUNTER_ROLE;
+
+    /// @notice Owner of the game contract. May retune the economy, wire or
+    ///         unwire the token, pause, and hand over ownership. On a public
+    ///         launch this should be a multisig, not a single key.
+    address public owner;
+
+    /// @notice The game token, if one is wired. Set to address(0) to run with
+    ///         no token at all - redemption then stays in ETH forever.
+    address public token;
+
+    /// @notice When false, redeemGems pays ETH even after graduation. The
+    ///         owner can enable the token rail only if `token` is set AND the
+    ///         contract holds enough of it to cover the claim.
+    bool public tokenRailEnabled;
+
+    /// @notice Emergency stop. Blocks hunts, purchases, and redemption. Set by
+    ///         the owner; does NOT affect already-settled state or the user's
+    ///         ability to exit via redemption once unpaused.
+    bool public paused;
 
     Season public current;
     mapping(uint64 => Season) public seasons;
@@ -166,8 +243,18 @@ contract DeepWood {
     event SeasonFinalized(uint64 indexed seasonId);
     event SeasonStarted(uint64 indexed seasonId, uint64 startsAt, uint64 endsAt);
     event MarkedGraduated();
+    event PausedStateChanged(bool paused);
+    event TokenSet(address indexed token);
+    event TokenRailChanged(bool enabled);
+    event OwnershipTransferred(address indexed from, address indexed to);
 
     error NotHunter();
+    error NotOwner();
+    error Paused();
+    error BadConfig();
+    error NoToken();
+    error TokenRailLocked();
+    error InsufficientTokenBalance();
     error ZeroAmount();
     error NotOpen();
     error SeasonNotEnded();
@@ -197,7 +284,27 @@ contract DeepWood {
         require(hunter != address(0), "hunter=0");
         TREASURY = treasury;
         HUNTER_ROLE = hunter;
+        owner = msg.sender;
+        config = Config({
+            burnFeeBps: 500, //         5%
+            seasonLength: 14 days,
+            huntCooldown: 3,
+            minSplay: 0.005 ether,
+            graduationGrace: 1 days,
+            baseSlots: 1,
+            maxSlots: 4
+        });
         _startSeason(1);
+    }
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+
+    modifier whenNotPaused() {
+        if (paused) revert Paused();
+        _;
     }
 
     modifier onlyHunter() {
@@ -257,9 +364,9 @@ contract DeepWood {
 
     function _startSeason(uint64 id) internal {
         uint64 start = uint64(block.timestamp);
-        seasons[id] = Season({id: id, startsAt: start, endsAt: start + SEASON_LENGTH, finalized: false, bestSingleFindWei: 0, commitRoot: bytes32(0), committed: false});
+        seasons[id] = Season({id: id, startsAt: start, endsAt: start + config.seasonLength, finalized: false, bestSingleFindWei: 0, commitRoot: bytes32(0), committed: false});
         current = seasons[id];
-        emit SeasonStarted(id, start, start + SEASON_LENGTH);
+        emit SeasonStarted(id, start, start + config.seasonLength);
     }
 
     function finalizeSeason() external {
@@ -293,7 +400,7 @@ contract DeepWood {
     /// @notice True once redemption should switch to the game token. Intentionally
     ///         NOT yet reachable - the token rail is a mainnet change (SPEC §4).
     function tokenRedemptionActive() public view returns (bool) {
-        return graduated && block.timestamp >= graduatedAt + GRADUATION_GRACE;
+        return graduated && tokenRailEnabled && block.timestamp >= graduatedAt + config.graduationGrace;
     }
 
     // =====================================================================
@@ -303,7 +410,7 @@ contract DeepWood {
     /// @notice Buy gems at a fixed ETH price. Rare and above are HUNT-ONLY -
     ///         an ETH path to Rare+ would make hunting decorative and collapse
     ///         the game to "convert ETH to gems" (SPEC §4, R1).
-    function buyGems(Rarity rarity, uint256 count) external payable {
+    function buyGems(Rarity rarity, uint256 count) external payable whenNotPaused {
         if (count == 0) revert ZeroAmount();
         if (rarity > Rarity.Uncommon) revert RarityNotForSale();
 
@@ -329,7 +436,7 @@ contract DeepWood {
     ///         SEQUENTIALLY (own tier-1 before tier-2, etc.) and cost gems.
     /// @dev Sequential claiming is the core anti-whale structure: there is no
     ///      shortcut from zero to a good drop table.
-    function claimTool(uint8 tier) external {
+    function claimTool(uint8 tier) external whenNotPaused {
         if (tier == 0 || tier > 4) revert ToolOutOfRange();
 
         Tool[] storage t = _tools[msg.sender];
@@ -386,7 +493,7 @@ contract DeepWood {
     /// @notice Repair a broken tool. A broken tool KEEPS its tier and slot but
     ///         cannot be swung until repaired (SPEC §5) - burning it would
     ///         delete permanent progress over one bad night.
-    function repairTool(uint8 index) external {
+    function repairTool(uint8 index) external whenNotPaused {
         Tool storage t = _toolAt(msg.sender, index);
         if (t.durability != 0) revert NotBroken();
         uint256 cost = repairCost(t.tier);
@@ -408,7 +515,7 @@ contract DeepWood {
     /// @notice Raise your skill level: unlocks a tool slot and a higher
     ///         findable rarity. Costs gems. This is the ceiling money CANNOT
     ///         buy (R1).
-    function upgradeSkill(uint8 targetSkill) external {
+    function upgradeSkill(uint8 targetSkill) external whenNotPaused {
         uint8 cur = skillOf[msg.sender];
         if (targetSkill <= cur || targetSkill > 4) revert TierLocked();
         uint256 cost = 500 * uint256(targetSkill);
@@ -416,10 +523,10 @@ contract DeepWood {
         skillOf[msg.sender] = targetSkill;
 
         // A skill level raises BOTH the slot count and the findable ceiling.
-        uint8 newSlots = BASE_SLOTS + (targetSkill >= 3 ? 1 : 0) + (targetSkill >= 4 ? 1 : 0);
-        if (newSlots > MAX_SLOTS) newSlots = MAX_SLOTS;
-        uint8 base = BASE_SLOTS + _slotBonus[msg.sender];
-        if (newSlots > base) _slotBonus[msg.sender] = newSlots - BASE_SLOTS;
+        uint8 newSlots = config.baseSlots + (targetSkill >= 3 ? 1 : 0) + (targetSkill >= 4 ? 1 : 0);
+        if (newSlots > config.maxSlots) newSlots = config.maxSlots;
+        uint8 base = config.baseSlots + _slotBonus[msg.sender];
+        if (newSlots > base) _slotBonus[msg.sender] = newSlots - config.baseSlots;
 
         // Unlock rarities findable at this skill. The mapping is explicit
         // rather than computed, because the enum indices and the skill
@@ -469,10 +576,10 @@ contract DeepWood {
     ///      signature-verification: the hunter can withhold a result (liveness
     ///      risk, R5) but cannot forge one without the role. `signature` is
     ///      present so an EIP-712 upgrade is a drop-in.
-    function settleHunt(address player, uint8 toolTier, uint256[5] calldata counts, uint256 valueWei, bytes calldata signature) external onlyHunter {
+    function settleHunt(address player, uint8 toolTier, uint256[5] calldata counts, uint256 valueWei, bytes calldata signature) external onlyHunter whenNotPaused {
         if (!current.committed) revert NotCommitted();
         if (signature.length == 0) revert BadSignature();
-        if (block.timestamp < _p[player].lastHuntAt + HUNT_COOLDOWN) revert CooldownActive();
+        if (block.timestamp < _p[player].lastHuntAt + config.huntCooldown) revert CooldownActive();
 
         // The tool actually used must be owned, active, and NOT broken.
         Tool storage tool = _activeTool(player);
@@ -523,6 +630,104 @@ contract DeepWood {
     }
 
     // =====================================================================
+    // Owner controls - the "not hardcoded" surface
+    // =====================================================================
+    //
+    // Everything the owner may change, they change HERE and nowhere else. The
+    // guards below are the important part: an owner with a bug should not be
+    // able to brick the game or reopen a closed exploit by accident.
+
+    /// @notice Retune the economy. One call, all-or-nothing.
+    /// @dev Validation lives in the setter rather than in comments, because
+    ///      an owner will eventually type a zero. The specific rejections:
+    ///        burnFeeBps > 100%   - a fee above 100% underflows the subtraction
+    ///        seasonLength == 0   - no season could ever end
+    ///        huntCooldown == 0   - kills the anti-spam design
+    ///        minSplay == 0       - re-opens the splay-floor exploit (R2)
+    ///        maxSlots < baseSlots- would strand already-claimed tools
+    function setConfig(
+        uint256 burnFeeBps,
+        uint64 seasonLength,
+        uint64 huntCooldown,
+        uint256 minSplay,
+        uint64 graduationGrace,
+        uint8 baseSlots,
+        uint8 maxSlots
+    ) external onlyOwner {
+        if (burnFeeBps > MAX_BURN_FEE_BPS) revert BadConfig();
+        if (seasonLength == 0 || seasonLength > MAX_SEASON_LENGTH) revert BadConfig();
+        if (huntCooldown > MAX_HUNT_COOLDOWN) revert BadConfig();
+        if (minSplay == 0) revert BadConfig();
+        if (graduationGrace > MAX_GRADUATION_GRACE) revert BadConfig();
+        if (baseSlots == 0 || maxSlots < baseSlots) revert BadConfig();
+        if (maxSlots > HARD_MAX_SLOTS) revert BadConfig();
+
+        config = Config({
+            burnFeeBps: burnFeeBps,
+            seasonLength: seasonLength,
+            huntCooldown: huntCooldown,
+            minSplay: minSplay,
+            graduationGrace: graduationGrace,
+            baseSlots: baseSlots,
+            maxSlots: maxSlots
+        });
+        emit ConfigUpdated(burnFeeBps, seasonLength, huntCooldown, minSplay, graduationGrace, baseSlots, maxSlots);
+    }
+
+    /// @notice Emergency stop. Blocks new hunts, purchases, and redemption.
+    function setPaused(bool value) external onlyOwner {
+        paused = value;
+        emit PausedStateChanged(value);
+    }
+
+    /// @notice Point the game at a token contract, or pass address(0) to run
+    ///         with no token at all.
+    /// @dev Unwiring the token automatically disables the rail, so redemption
+    ///      can never try to pay through a token the game no longer knows.
+    function setToken(address t) external onlyOwner {
+        token = t;
+        if (t == address(0)) {
+            tokenRailEnabled = false;
+            emit TokenRailChanged(false);
+        }
+        emit TokenSet(t);
+    }
+
+    /// @notice Turn token redemption on or off. Independent of `token` being
+    ///         set, so the owner can pre-configure the address and flip the
+    ///         rail only at launch.
+    function setTokenRail(bool enabled) external onlyOwner {
+        if (enabled && token == address(0)) revert NoToken();
+        tokenRailEnabled = enabled;
+        emit TokenRailChanged(enabled);
+    }
+
+    /// @notice Move the game token into the contract so it can pay redemptions.
+    function fundToken(uint256 amount) external onlyOwner {
+        if (token == address(0)) revert NoToken();
+        if (!IERC20(token).transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
+    }
+
+    /// @notice Hand the game contract to a new owner (a multisig, later).
+    function transferOwnership(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) revert NotOwner();
+        address old = owner;
+        owner = newOwner;
+        emit OwnershipTransferred(old, newOwner);
+    }
+
+    /// @notice Read every economic knob in one call, so the client never has
+    ///         to make seven round-trips or guess which ones still exist.
+    function getConfig()
+        external
+        view
+        returns (uint256 burnFeeBps, uint64 seasonLength, uint64 huntCooldown, uint256 minSplay, uint64 graduationGrace, uint8 baseSlots, uint8 maxSlots)
+    {
+        Config memory c = config;
+        return (c.burnFeeBps, c.seasonLength, c.huntCooldown, c.minSplay, c.graduationGrace, c.baseSlots, c.maxSlots);
+    }
+
+    // =====================================================================
     // Burn helper (R3)
     // =====================================================================
 
@@ -535,7 +740,7 @@ contract DeepWood {
         if (p.gems[Rarity.Common] < gems) revert InsufficientGems();
         p.gems[Rarity.Common] -= gems;
         p.totalGemsBurned += gems;
-        fee = (gems * BURN_FEE_BPS) / BPS_DENOMINATOR;
+        fee = (gems * config.burnFeeBps) / BPS_DENOMINATOR;
         treasuryGems += fee;
         // backing untouched: burned value remains as permanent collateral
     }
@@ -544,21 +749,44 @@ contract DeepWood {
     // Redeem (R3, R6)
     // =====================================================================
 
-    /// @notice Redeem gems for ETH at face value. No spread - the burns and
-    ///         hunt costs are the sinks; a spread would only breed distrust.
-    function redeemGems(Rarity rarity, uint256 gems) external {
+    /// @notice Redeem gems at face value. Pays the game token once the token
+    ///         rail is live (graduated + past grace + rail enabled), and ETH
+    ///         until then.
+    /// @dev No spread - the burns and hunt costs are the sinks; a spread
+    ///      would only breed distrust. The token path pays at the SAME face
+    ///      value, so switching rails never changes what a gem is worth.
+    /// @dev The game only ever PAYS tokens out. It never pulls them from a
+    ///      player, so no allowance is involved on the player's side.
+    function redeemGems(Rarity rarity, uint256 gems) external whenNotPaused {
         if (gems == 0) revert ZeroAmount();
-        // Post-graduation (post-grace) redemption switches to the game token
-        // in a mainnet build. On testnet/this build, ETH is the only rail.
         Player storage p = _p[msg.sender];
         if (p.gems[rarity] < gems) revert InsufficientGems();
-        p.gems[rarity] -= gems;
 
         uint256 payout = gems * priceOf(rarity);
-        ethBacking -= payout;
-        (bool ok,) = payable(msg.sender).call{value: payout}("");
-        if (!ok) revert TransferFailed();
-        emit GemsRedeemed(msg.sender, rarity, gems, payout);
+
+        if (tokenRedemptionActive()) {
+            // Pays in token units 1:1 with the ETH face value, so the token
+            // must be 18-decimal for the numbers to mean the same thing.
+            if (IERC20(token).decimals() != 18) revert BadConfig();
+            uint256 owed = payout / PRICE_SCALE;
+            if (IERC20(token).balanceOf(address(this)) < owed) revert InsufficientTokenBalance();
+            // Debit AFTER the external reads, not before: a reentrant token
+            // must not be able to spend the same gems twice. If the call
+            // fails or drains the balance, this reverts and rolls back.
+            p.gems[rarity] -= gems;
+            // Check the return value. A non-standard token that returns
+            // false (rather than reverting) would otherwise let the gems be
+            // burned with nothing paid out, which is the worst possible
+            // failure mode for a redemption.
+            if (!IERC20(token).transfer(msg.sender, owed)) revert TransferFailed();
+            emit GemsRedeemed(msg.sender, rarity, gems, owed);
+        } else {
+            p.gems[rarity] -= gems;
+            ethBacking -= payout;
+            (bool ok,) = payable(msg.sender).call{value: payout}("");
+            if (!ok) revert TransferFailed();
+            emit GemsRedeemed(msg.sender, rarity, gems, payout);
+        }
     }
 
     /// @notice Treasury redeems accumulated burn fees in bulk. Holding fees in
@@ -595,12 +823,12 @@ contract DeepWood {
      */
     function roi(address player) external view returns (uint256) {
         Player storage p = _p[player];
-        if (p.totalEthSpent < MIN_SPLAY) return 0;
+        if (p.totalEthSpent < config.minSplay) return 0;
         return (p.legendaryEquivalents * 1e18) / p.totalEthSpent;
     }
 
     function onRoiBoard(address player) external view returns (bool) {
-        return _p[player].totalEthSpent >= MIN_SPLAY;
+        return _p[player].totalEthSpent >= config.minSplay;
     }
 
     // =====================================================================

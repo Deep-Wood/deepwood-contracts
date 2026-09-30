@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {DeepWood} from "../src/DeepWood.sol";
+import {DeepWoodToken} from "../src/DeepWoodToken.sol";
 
 /**
  * @notice DeepWood invariant tests.
@@ -40,7 +41,8 @@ contract DeepWoodTest is Test {
     }
 
     function _cd() internal {
-        vm.warp(block.timestamp + dw.HUNT_COOLDOWN() + 1);
+        (, , uint64 cd, , , , ) = dw.getConfig();
+        vm.warp(block.timestamp + cd + 1);
     }
 
     function _seasonId() internal view returns (uint64) {
@@ -291,7 +293,8 @@ contract DeepWoodTest is Test {
         uint256 _price = dw.priceOf(DeepWood.Rarity.Common);
         vm.prank(alice);
         dw.buyGems{value: _price * 1}(DeepWood.Rarity.Common, 1);
-        assertLt(_ethSpent(alice), dw.MIN_SPLAY());
+        (, , , uint256 minSplay, , , ) = dw.getConfig();
+        assertLt(_ethSpent(alice), minSplay);
         assertFalse(dw.onRoiBoard(alice));
         assertEq(dw.roi(alice), 0, "below splay floor, ROI is zeroed");
     }
@@ -478,7 +481,8 @@ contract DeepWoodTest is Test {
 
     function test_FinalizeRollsSeason() public {
         uint64 first = _seasonId();
-        vm.warp(block.timestamp + dw.SEASON_LENGTH() + 1);
+        (, uint64 sl, , , , , ) = dw.getConfig();
+        vm.warp(block.timestamp + sl + 1);
         dw.finalizeSeason();
         assertEq(_seasonId(), first + 1);
     }
@@ -501,12 +505,26 @@ contract DeepWoodTest is Test {
     // =====================================================================
 
     function test_GraduationStartsGraceWindow() public {
+        // A token must be wired AND the rail enabled before redemption can
+        // pay out in token. Graduating alone is not enough - otherwise a
+        // game with no token at all would try to pay through address(0).
         vm.prank(hunter);
         dw.markGraduated();
         assertTrue(dw.graduated());
         assertFalse(dw.tokenRedemptionActive(), "not immediately - grace window");
-        vm.warp(block.timestamp + dw.GRADUATION_GRACE() + 1);
-        assertTrue(dw.tokenRedemptionActive());
+
+        (, , , , uint64 gg, , ) = dw.getConfig();
+        vm.warp(block.timestamp + gg + 1);
+        assertFalse(dw.tokenRedemptionActive(), "graduated and past grace, but no token wired");
+
+        // Wire a token and flip the rail: now the rail is live. This test
+        // contract deployed `dw` in setUp, so it is already the owner.
+        DeepWoodToken t = new DeepWoodToken(address(this), 1_000_000 ether);
+        dw.setToken(address(t));
+        assertFalse(dw.tokenRedemptionActive(), "token set, but rail not enabled yet");
+
+        dw.setTokenRail(true);
+        assertTrue(dw.tokenRedemptionActive(), "token + rail + past grace => live");
     }
 
     function test_CannotGraduateTwice() public {
