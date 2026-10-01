@@ -3,4 +3,26 @@ src = "src"
 out = "out"
 libs = ["lib"]
 
+# Optimise for CODE SIZE, not runtime gas.
+#
+# At the default runs=200 the contract was 26,878 bytes -- 2,302 OVER the
+# EIP-170 limit of 24,576, so it could not be deployed at all (anvil rejected
+# it with CreateContractSizeLimit). No unit test caught this: forge test does
+# not enforce EIP-170, only an actual deploy does.
+#
+# runs=1 emits 15,839 bytes, which restores 8,737 bytes of margin. The trade is
+# higher gas per call. That is the right way round for a game contract whose
+# settlement path is a handful of transactions per player per season; it would
+# be the wrong trade for something hot.
+optimizer = true
+optimizer_runs = 1
+
+# Fail the build if any contract would be undeployable. `forge test` does NOT
+# enforce EIP-170 -- it compiles and runs happily on an oversized contract, so
+# the size regression passed a fully green 86-test suite and was only caught by
+# anvil rejecting the deploy. `forge build --sizes` exits non-zero when the limit
+# is breached, so wiring it here makes CI fail instead.
+#
+#   forge script script/CheckSize.s.sol
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
