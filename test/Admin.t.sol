@@ -14,6 +14,7 @@ import {DeepWoodToken} from "../src/DeepWoodToken.sol";
  * exist.
  */
 contract AdminTest is Test {
+    bytes32 internal constant SEED = keccak256("deepwood-season-1-seed");
     DeepWood dw;
     DeepWoodToken token;
 
@@ -174,18 +175,20 @@ contract AdminTest is Test {
         // cooldown has elapsed since epoch (as on any real chain).
         _cd();
 
-        vm.prank(hunter);
-        dw.settleHunt(alice, 1, _g(1, 0, 0, 0, 0), cost, _sig());
+        (uint256[5] memory c0, uint256 v0) = dw.previewHunt(alice, 1);
+        vm.prank(alice);
+        dw.settleHunt(alice, 1, c0, v0, _sig());
 
         // 30s is inside the new 60s cooldown.
         vm.warp(block.timestamp + 30);
-        vm.prank(hunter);
         vm.expectRevert(DeepWood.CooldownActive.selector);
-        dw.settleHunt(alice, 1, _g(1, 0, 0, 0, 0), cost, _sig());
+        vm.prank(alice);
+        dw.settleHunt(alice, 1, c0, v0, _sig());
 
         vm.warp(block.timestamp + 31);
-        vm.prank(hunter);
-        dw.settleHunt(alice, 1, _g(1, 0, 0, 0, 0), cost, _sig());
+        (uint256[5] memory c1, uint256 v1) = dw.previewHunt(alice, 1);
+        vm.prank(alice);
+        dw.settleHunt(alice, 1, c1, v1, _sig());
         (,,,,, uint64 hunts) = dw.playerStats(alice);
         assertEq(hunts, 2, "second hunt landed after the cooldown");
     }
@@ -392,6 +395,8 @@ function test_TokenRedemptionRefusesIfContractIsUnderfunded() public {
     function _commit() internal {
         vm.prank(hunter);
         dw.commitSeason(bytes32(uint256(0xC0FFEE)));
+        vm.prank(hunter);
+        dw.commitSeed(SEED);
     }
 
     function _cd() internal {

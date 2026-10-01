@@ -42,7 +42,7 @@ contract DeployPreflightTest is Test {
     }
 
     function test_seasonOneStartsOnDeployment() public view {
-        (uint64 id, uint64 startsAt, uint64 endsAt, bool finalized, , , ) = dw.current();
+        (uint64 id, uint64 startsAt, uint64 endsAt, bool finalized, , , , , ) = dw.current();
         assertEq(id, 1, "first deployment starts season 1");
         assertEq(finalized, false, "season must not be pre-finalized");
         assertLe(startsAt, block.timestamp, "season has already started");
@@ -54,7 +54,7 @@ contract DeployPreflightTest is Test {
     /// @notice The 14-day clock starts the INSTANT the contract is deployed.
     /// There is no grace period, so deploying early burns real season time.
     function test_seasonClockIsAlreadyRunning() public view {
-        (, , uint64 endsAt, , , , ) = dw.current();
+        (, , uint64 endsAt, , , , , , ) = dw.current();
         assertGt(endsAt, block.timestamp, "season 1 expires during this test block");
     }
 

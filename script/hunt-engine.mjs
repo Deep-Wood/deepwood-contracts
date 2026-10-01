@@ -78,10 +78,15 @@ export function rollHunt(seed, player, huntIndex, toolTier) {
 
   // Gem count per hunt: 3..5 inclusive, derived from the same seed stream so
   // the whole result stays a deterministic function of its inputs.
+  // The 0x PREFIX MUST BE STRIPPED. String(player).toLowerCase() keeps it, so
+  // the preimage was 42 bytes for a 0x-prefixed address while the contract
+  // hashes the bare 40-char hex -- every single hunt would have been rejected
+  // with ResultMismatch. Found by test/RollParity.t.sol, which compares this
+  // engine against the contract; nothing on either side alone would notice.
   const h = keccakLike(Buffer.concat([
     toBuf32(BigInt(seed)),
     toBuf32(huntIndex),
-    Buffer.from(String(player).toLowerCase()),
+    Buffer.from(String(player).toLowerCase().replace(/^0x/, '')),
   ]));
   const gemCount = 3 + (h[0] % 3); // 3, 4 or 5
 

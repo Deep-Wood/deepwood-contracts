@@ -60,6 +60,14 @@ contract DeepWood {
         uint256 bestSingleFindWei; // season-wide
         bytes32 commitRoot; // merkle root of outcomes, committed BEFORE hunting
         bool committed;
+        // The season's randomness, committed BEFORE any hunt of that season.
+        //
+        // commitRoot is an AUDIT artefact; seed is the AUTHORITY. settleHunt
+        // recomputes the result from this and rejects any claim that does not
+        // match, which is what lets anyone settle their own hunt with no keeper
+        // and no signature. Both are set once, before play.
+        bytes32 seed;
+        bool seedCommitted;
     }
 
     /// @notice A tool the player owns. Non-tradable, so tier IS the player's
@@ -79,6 +87,11 @@ contract DeepWood {
         uint256 legendaryEquivalents; //  rarity-weighted (ROI numerator)
         uint64 totalHunts;
         uint64 lastHuntAt;
+        // Monotonic per player WITHIN the current season. This is the huntIndex
+        // the seed is rolled against, so it must reset when the season rolls
+        // over -- a lifetime counter would let a player replay hunt 0 of a past
+        // season's outcomes.
+        uint64 huntsThisSeason;
     }
 
     // =====================================================================
@@ -188,6 +201,10 @@ contract DeepWood {
     mapping(uint64 => Season) public seasons;
     mapping(address => Player) private _p;
 
+    // Total hunts settled in the CURRENT season. Zero before the seed is
+    // committed, which is what lets commitSeed refuse a late swap.
+    uint256 private _huntsThisSeasonTotal;
+
     /// @notice Extra slots granted by skill upgrades. Stored as a DELTA over
     ///         BASE_SLOTS so a fresh player (who has never called
     ///         upgradeSkill) correctly reads BASE_SLOTS rather than zero.
@@ -240,6 +257,7 @@ contract DeepWood {
     event SkillUpgraded(address indexed player, uint256 gemsSpent, uint256 burnFee);
     event GemsRedeemed(address indexed player, Rarity rarity, uint256 gems, uint256 ethPaid);
     event SeasonCommitted(uint64 indexed seasonId, bytes32 root);
+    event SeasonSeedCommitted(uint64 indexed seasonId, bytes32 seed);
     event SeasonFinalized(uint64 indexed seasonId);
     event SeasonStarted(uint64 indexed seasonId, uint64 startsAt, uint64 endsAt);
     event MarkedGraduated();
@@ -270,6 +288,10 @@ contract DeepWood {
     error SlotLimit();
     error NotBroken();
     error BadSignature();
+    error SeedAlreadyCommitted();
+    error SeedNotCommitted();
+    error ResultMismatch();
+    error SeasonHasHunts();
     error TransferFailed();
     error OnlyTreasury();
     error RarityNotForSale();
@@ -364,7 +386,7 @@ contract DeepWood {
 
     function _startSeason(uint64 id) internal {
         uint64 start = uint64(block.timestamp);
-        seasons[id] = Season({id: id, startsAt: start, endsAt: start + config.seasonLength, finalized: false, bestSingleFindWei: 0, commitRoot: bytes32(0), committed: false});
+        seasons[id] = Season({id: id, startsAt: start, endsAt: start + config.seasonLength, finalized: false, bestSingleFindWei: 0, commitRoot: bytes32(0), committed: false, seed: bytes32(0), seedCommitted: false});
         current = seasons[id];
         emit SeasonStarted(id, start, start + config.seasonLength);
     }
@@ -372,6 +394,9 @@ contract DeepWood {
     function finalizeSeason() external {
         if (block.timestamp < current.endsAt) revert SeasonNotEnded();
         uint64 id = current.id;
+        // Per-player hunt indices restart with the season; a lifetime counter
+        // would let a player replay hunt 0 of a past season's outcomes.
+        _huntsThisSeasonTotal = 0;
         emit SeasonFinalized(id);
         _startSeason(id + 1);
     }
@@ -576,13 +601,29 @@ contract DeepWood {
     ///      signature-verification: the hunter can withhold a result (liveness
     ///      risk, R5) but cannot forge one without the role. `signature` is
     ///      present so an EIP-712 upgrade is a drop-in.
-    function settleHunt(address player, uint8 toolTier, uint256[5] calldata counts, uint256 valueWei, bytes calldata signature) external onlyHunter whenNotPaused {
+    function settleHunt(address player, uint8 toolTier, uint256[5] calldata counts, uint256 valueWei, bytes calldata signature) external whenNotPaused {
         if (!current.committed) revert NotCommitted();
-        if (signature.length == 0) revert BadSignature();
+        if (!current.seedCommitted) revert SeedNotCommitted();
         if (block.timestamp < _p[player].lastHuntAt + config.huntCooldown) revert CooldownActive();
+        // Anyone may relay, but the CALLER settles THEIR OWN hunt. Settling
+        // someone else's is pointless under seed verification -- the result is
+        // fixed by (seed, season, player, index) -- and allowing it would let one
+        // account burn another's cooldown and durability.
+        if (msg.sender != player) revert NotOwner();
 
         // The tool actually used must be owned, active, and NOT broken.
         Tool storage tool = _activeTool(player);
+        if (tool.tier != toolTier) revert ToolOutOfRange();
+
+        // THE ACTUAL GUARANTEE. Recompute the hunt from the committed seed and
+        // reject anything that does not match, so the claim cannot be inflated,
+        // omitted or reordered. Everything else here is bookkeeping.
+        Player storage pp = _p[player];
+        (uint256[5] memory expected, uint256 expectedBest) = _rollHunt(current.seed, player, pp.huntsThisSeason, toolTier);
+        for (uint256 i = 0; i < 5; i++) {
+            if (counts[i] != expected[i]) revert ResultMismatch();
+        }
+        if (valueWei != expectedBest) revert ResultMismatch();
 
         // Reject any find above what tool+skill permit: the hunter cannot
         // inflate a result beyond the player's own ceiling (R1 + R5).
@@ -594,6 +635,8 @@ contract DeepWood {
         Player storage p = _p[player];
         p.lastHuntAt = uint64(block.timestamp);
         p.totalHunts += 1;
+        p.huntsThisSeason += 1;
+        _huntsThisSeasonTotal += 1;
 
         uint256 total = 0;
         for (uint256 i = 0; i < 5; i++) {
@@ -616,6 +659,113 @@ contract DeepWood {
         tool.durability -= 1; // may hit 0 => broken (kept, repairable)
 
         emit HuntSettled(player, total, valueWei, cost);
+    }
+
+    // =====================================================================
+    // Open settlement (replaces keeper-signed settleHunt)
+    // =====================================================================
+    //
+    // The keeper signed results but the signature was never verified: settleHunt
+    // only checked that `signature.length != 0`. That is an AUTHORITY defect,
+    // not a liveness one -- whoever held HUNTER_ROLE could post a fabricated
+    // find, and the contract could not tell.
+    //
+    // The seed removes that party entirely. The season's randomness is
+    // committed once, before any hunt, and settleHunt RECOMPUTES the outcome
+    // and rejects any claim that does not match. There is no signature to forge
+    // and no relayer to keep online, so a player settles alone at any hour.
+
+    /// @notice Commit this season's seed. Once, before any hunt of the season.
+    /// @dev Callable by the owner OR the hunter, because committing once a
+    ///      season is a liveness task, not a trust one -- whoever does it is
+    ///      bound by the value forever after, which is the whole point. Refused
+    ///      once any hunt is settled so the operator cannot swap the seed after
+    ///      seeing results.
+    function commitSeed(bytes32 seed) external {
+        if (msg.sender != HUNTER_ROLE && msg.sender != owner) revert NotHunter();
+        if (current.seedCommitted) revert SeedAlreadyCommitted();
+        if (_huntsThisSeasonTotal != 0) revert SeasonHasHunts();
+        current.seed = seed;
+        current.seedCommitted = true;
+        emit SeasonSeedCommitted(current.id, seed);
+    }
+
+    /// @dev Lowercase 40-char hex of an address, no 0x. The engine hashes the
+    ///      lowercase STRING (Buffer.from(player.toLowerCase())), not the
+    ///      20 address bytes, so this must match byte-for-byte or every
+    ///      on-chain roll diverges from the client's.
+    function _lowerHex(address a) internal pure returns (bytes memory out) {
+        bytes memory hexd = "0123456789abcdef";
+        out = new bytes(40);
+        for (uint256 i = 0; i < 20; i++) {
+            // 8*(19-i), NOT 160-8*(19-i): the latter shifts past the first byte
+            // and every address differing only in its leading byte hashed the
+            // same, so two players rolled identically.
+            uint8 b = uint8(uint160(a) >> (8 * (19 - i)));
+            out[i * 2] = hexd[b >> 4];
+            out[i * 2 + 1] = hexd[b & 0x0f];
+        }
+    }
+
+    /// @dev Byte-identical to rollHunt() in script/hunt-engine.mjs.
+    ///      Keccak -- not sha256 -- because Ethereum hashes with keccak256; the
+    ///      engine was corrected for exactly that and the two must not drift.
+    ///      toolTier is INSIDE the per-gem stream: without it a tier-1 and a
+    ///      tier-2 roll at the same index share entropy and can return an
+    ///      identical gem sequence.
+    function _rollHunt(bytes32 seed, address player, uint64 huntIndex, uint8 toolTier)
+        internal
+        pure
+        returns (uint256[5] memory counts, uint256 bestSingleWei)
+    {
+        if (toolTier == 0 || toolTier > 4) revert ToolOutOfRange();
+        uint256[5] memory table = dropTable(toolTier);
+
+        bytes32 h = keccak256(abi.encodePacked(seed, bytes32(uint256(huntIndex)), _lowerHex(player)));
+        uint256 gemCount = 3 + (uint256(uint8(h[0])) % 3); // 3, 4 or 5
+
+        for (uint256 i = 0; i < gemCount; i++) {
+            bytes32 gb = keccak256(abi.encodePacked(h, uint256(toolTier), uint8(i)));
+            uint256 roll = (((uint256(uint8(gb[0])) << 16) | (uint256(uint8(gb[1])) << 8) | uint256(uint8(gb[2]))) % 10000);
+
+            uint256 acc = 0;
+            uint256 picked = 4;
+            for (uint256 r = 0; r < 5; r++) {
+                acc += table[r];
+                if (roll < acc) {
+                    picked = r;
+                    break;
+                }
+            }
+            counts[picked] += 1;
+            uint256 pv = priceOf(Rarity(picked));
+            if (pv > bestSingleWei) bestSingleWei = pv;
+        }
+    }
+
+    /// @notice The result this player's next hunt WILL settle as.
+    /// @dev Not a cheat surface: settleHunt recomputes the identical value and
+    ///      rejects any claim that differs, so previewing tells a caller what to
+    ///      submit and nothing else. Reading it does not advance the index --
+    ///      only a settled hunt does. The client calls this to render a hunt it
+    ///      is about to settle, so the two can never disagree on screen.
+    function previewHunt(address player, uint8 toolTier) external view returns (uint256[5] memory counts, uint256 bestSingleWei) {
+        if (!current.seedCommitted) revert SeedNotCommitted();
+        return _rollHunt(current.seed, player, _p[player].huntsThisSeason, toolTier);
+    }
+
+    /// @notice The committed seed for the current season.
+    function seasonSeed() external view returns (bytes32) {
+        return current.seed;
+    }
+
+    function totalHuntsOf(address who) external view returns (uint64) {
+        return _p[who].totalHunts;
+    }
+
+    /// @dev The per-season hunt index the seed rolls against.
+    function huntIndexOf(address who) external view returns (uint64) {
+        return _p[who].huntsThisSeason;
     }
 
     function _activeTool(address who) internal view returns (Tool storage) {

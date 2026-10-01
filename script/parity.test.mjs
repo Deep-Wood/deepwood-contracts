@@ -9,7 +9,7 @@
  * This compares actual roll output across every tier and a range of indices.
  */
 import { rollHunt as serverRoll } from '/home/administrator/gem-hunter/script/hunt-engine.mjs';
-import { rollHunt as clientRoll } from '/home/administrator/deepwood-app/src/engine.js';
+import { rollHunt as clientRoll } from '/home/administrator/deepwood-site/src/engine.js';
 
 let fail = 0;
 // Compare only the fields that MUST agree. The server returns an extra
@@ -50,11 +50,25 @@ for (const seed of ['0x1', '0xdeadbeef', '0xffffffffffffffff']) {
 }
 
 console.log('\nanti-whale parity: same spend, different wallets, same ROI input');
-// The contract ranks on a ratio, so identical finds for different spend must
-// produce identical rarity-weight even when the wallets differ.
-const a = serverRoll('0x5eed', '0xwhale', 0, 4);
-const b = clientRoll('0x5eed', '0xminnow', 0, 4);
-check('whale and minnow find the same thing for the same index', String(a.counts) === String(b.counts));
+// SAME player, both engines: must agree exactly. This is the one that matters --
+// it is the whole client/contract agreement the settlement path depends on.
+const same1 = serverRoll('0x5eed', '0x5EED', 0, 4);
+const same2 = clientRoll('0x5eed', '0x5EED', 0, 4);
+check('both engines agree for the same player', String(same1.counts) === String(same2.counts));
+check(
+  'and for the same player written without a 0x prefix',
+  String(clientRoll('0x5eed', '0x5eed', 0, 4).counts) === String(same2.counts)
+);
+
+// DIFFERENT players must DIVERGE. This used to assert the opposite -- that
+// whale and minnow find the same thing -- which was true of the keeper model
+// where one party handed everyone the same result. Under a committed seed the
+// result is derived from (seed, season, player, index), so equal play no longer
+// implies an equal outcome. The contract verifies this per player; a test that
+// asserted identical finds would now be asserting a bug.
+const diff1 = serverRoll('0x5eed', '0xwhale', 0, 4);
+const diff2 = serverRoll('0x5eed', '0xminnow', 0, 4);
+check('different players no longer roll identically', String(diff1.counts) !== String(diff2.counts));
 
 console.log(fail === 0 ? '\nPARITY OK' : `\n${fail} PARITY FAILURE(S)`);
 process.exit(fail === 0 ? 0 : 1);
