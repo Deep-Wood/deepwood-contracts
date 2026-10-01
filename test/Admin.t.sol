@@ -415,3 +415,115 @@ function test_TokenRedemptionRefusesIfContractIsUnderfunded() public {
         dw.claimTool(1);
     }
 }
+
+// --- season open/close ----------------------------------------------------
+//
+// The rule: a season that has been finalized away comes back CLOSED, and the
+// owner opens it deliberately. Without this, a rollover silently starts
+// accepting hunts against a seed nobody has had a chance to look at.
+contract SeasonOpenGateTest is Test {
+    DeepWood dw;
+    address owner = address(this);
+    address hunter = address(0xBEEF);
+    address alice = address(0xA11CE);
+
+    function setUp() public {
+        dw = new DeepWood(address(0xCAFE), hunter);
+        vm.startPrank(hunter);
+        dw.commitSeason(bytes32(uint256(0xC0FFEE)));
+        dw.commitSeed(keccak256("season-open-gate"));
+        vm.stopPrank();
+        vm.prank(alice);
+        dw.claimTool(1);
+    }
+
+    function _seasonLength() internal view returns (uint64) {
+        (, uint64 len, , , , , ) = dw.getConfig(); // seasonLength is word 1; word 2 is huntCooldown
+        return len;
+    }
+
+    function _roll() internal returns (uint256[5] memory c, uint256 best) {
+        (c, best) = dw.previewHunt(alice, 1);
+    }
+
+    /// Foundry starts the block at timestamp 1 and the cooldown is 3s, so an
+    /// un-warped first settle always reverts CooldownActive. Warp once here
+    /// rather than in each test.
+    function _pastCooldown() internal {
+        vm.warp(block.timestamp + 100);
+    }
+
+    function test_SeasonOneIsOpenSoTheGameWorksImmediately() public {
+        assertTrue(dw.seasonOpen(), "a fresh deployment must accept hunts");
+    }
+
+    function test_CloseStopsSettlementImmediately() public {
+        _pastCooldown();
+        vm.prank(owner);
+        dw.closeSeason();
+        assertFalse(dw.seasonOpen());
+        (uint256[5] memory c, uint256 best) = _roll();
+        vm.prank(alice);
+        vm.expectRevert(DeepWood.SeasonNotOpen.selector);
+        dw.settleHunt(alice, 1, c, best, "");
+    }
+
+    function test_OpenRestoresIt() public {
+        _pastCooldown();
+        vm.startPrank(owner);
+        dw.closeSeason();
+        dw.openSeason();
+        vm.stopPrank();
+        assertTrue(dw.seasonOpen());
+        (uint256[5] memory c, uint256 best) = _roll();
+        vm.prank(alice);
+        dw.settleHunt(alice, 1, c, best, "");
+        assertEq(dw.huntIndexOf(alice), 1, "settlement works again");
+    }
+
+    function test_OpenRequiresACommittedSeed() public {
+        vm.warp(block.timestamp + _seasonLength() + 1);
+        dw.finalizeSeason(); // season 2 starts closed with NO seed
+        assertFalse(dw.seasonOpen(), "the next season must come up closed");
+        vm.prank(owner);
+        vm.expectRevert(DeepWood.SeedNotCommitted.selector);
+        dw.openSeason();
+    }
+
+    function test_NextSeasonIsClosedUntilOpened() public {
+        _pastCooldown();
+        vm.warp(block.timestamp + _seasonLength() + 1);
+        dw.finalizeSeason();
+        assertEq(dw.seasonSeed(), bytes32(0), "a new season has no seed yet");
+        assertFalse(dw.seasonOpen(), "closed, not live");
+
+        vm.startPrank(hunter);
+        dw.commitSeason(bytes32(uint256(0xBEEF)));
+        dw.commitSeed(keccak256("season-2"));
+        vm.stopPrank();
+        vm.prank(owner);
+        dw.openSeason();
+        assertTrue(dw.seasonOpen());
+
+        // A closed-then-opened season settles its own player's hunt at index 0.
+        (uint256[5] memory c, uint256 best) = _roll();
+        vm.prank(alice);
+        dw.settleHunt(alice, 1, c, best, "");
+        assertEq(dw.huntIndexOf(alice), 1);
+    }
+
+    function test_OnlyTheOwnerCanOpenOrClose() public {
+        vm.prank(alice);
+        vm.expectRevert();
+        dw.closeSeason();
+        vm.prank(hunter);
+        vm.expectRevert();
+        dw.openSeason();
+    }
+
+    function test_OpeningTwiceReverts() public {
+        vm.prank(owner);
+        vm.expectRevert(DeepWood.AlreadyCommitted.selector);
+        dw.openSeason();
+    }
+}

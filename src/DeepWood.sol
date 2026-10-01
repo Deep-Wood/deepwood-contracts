@@ -260,6 +260,10 @@ contract DeepWood {
     event SeasonSeedCommitted(uint64 indexed seasonId, bytes32 seed);
     event SeasonFinalized(uint64 indexed seasonId);
     event SeasonStarted(uint64 indexed seasonId, uint64 startsAt, uint64 endsAt);
+    /// @dev Emitted with the new value on both open and close, so a consumer
+    ///      cannot tell them apart from the log alone. `seasonOpen()` is the
+    ///      authoritative read; this is for indexing.
+    event SeasonOpened(uint64 indexed seasonId);
     event MarkedGraduated();
     event PausedStateChanged(bool paused);
     event TokenSet(address indexed token);
@@ -276,6 +280,10 @@ contract DeepWood {
     error ZeroAmount();
     error NotOpen();
     error SeasonNotEnded();
+    /// @dev The season is closed to hunts. Distinct from `paused`, which
+    ///      stops every write, and from SeasonNotEnded, which means the
+    ///      season simply has not finished yet.
+    error SeasonNotOpen();
     error NotCommitted();
     error AlreadyCommitted();
     error AlreadyGraduated();
@@ -317,6 +325,7 @@ contract DeepWood {
             maxSlots: 4
         });
         _startSeason(1);
+        seasonOpen = true; // season 1 opens with the contract, as it always has
     }
 
     modifier onlyOwner() {
@@ -384,11 +393,43 @@ contract DeepWood {
     // Season lifecycle
     // =====================================================================
 
+    /// @notice Whether the current season accepts hunts.
+    /// @dev Deliberately NOT a Season field. Adding one would change the
+    ///      `current()` tuple again and every decoder that pins its word
+    ///      order, including the shipped client's -- for a value that belongs
+    ///      to the running season rather than its record.
+    bool public seasonOpen;
+
+    /// @notice Start season `id` closed. `seasonOpen` is left untouched, so
+    ///         the constructor opens season 1 explicitly and finalizeSeason
+    ///         closes it before advancing -- a rollout never gets a window
+    ///         where hunts are live before someone chose to let them be.
     function _startSeason(uint64 id) internal {
         uint64 start = uint64(block.timestamp);
         seasons[id] = Season({id: id, startsAt: start, endsAt: start + config.seasonLength, finalized: false, bestSingleFindWei: 0, commitRoot: bytes32(0), committed: false, seed: bytes32(0), seedCommitted: false});
         current = seasons[id];
         emit SeasonStarted(id, start, start + config.seasonLength);
+    }
+
+    /// @notice Open the current season for hunting.
+    /// @dev Requires a committed seed first: opening a season whose results
+    ///      are not yet fixed would let hunts happen against a seed the owner
+    ///      could still replace, which is the exact hole the seed exists to
+    ///      close. Owner-only -- whoever picks the seed picks the outcome set.
+    function openSeason() external onlyOwner {
+        if (seasonOpen) revert AlreadyCommitted();
+        if (!current.seedCommitted) revert SeedNotCommitted();
+        seasonOpen = true;
+        emit SeasonOpened(current.id);
+    }
+
+    /// @notice Close the current season to new hunts without ending it.
+    /// @dev Stops settlement immediately and leaves the season's results and
+    ///      the leaderboard intact, unlike finalizeSeason which advances.
+    function closeSeason() external onlyOwner {
+        if (!seasonOpen) revert NotCommitted();
+        seasonOpen = false;
+        emit SeasonOpened(current.id);
     }
 
     function finalizeSeason() external {
@@ -398,6 +439,7 @@ contract DeepWood {
         // would let a player replay hunt 0 of a past season's outcomes.
         _huntsThisSeasonTotal = 0;
         emit SeasonFinalized(id);
+        seasonOpen = false; // the NEXT season comes up closed, by design
         _startSeason(id + 1);
     }
 
@@ -602,6 +644,7 @@ contract DeepWood {
     ///      risk, R5) but cannot forge one without the role. `signature` is
     ///      present so an EIP-712 upgrade is a drop-in.
     function settleHunt(address player, uint8 toolTier, uint256[5] calldata counts, uint256 valueWei, bytes calldata signature) external whenNotPaused {
+        if (!seasonOpen) revert SeasonNotOpen();
         if (!current.committed) revert NotCommitted();
         if (!current.seedCommitted) revert SeedNotCommitted();
         if (block.timestamp < _p[player].lastHuntAt + config.huntCooldown) revert CooldownActive();

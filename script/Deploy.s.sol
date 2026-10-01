@@ -68,6 +68,13 @@ contract Deploy is Script {
             console.log("token     :", gameToken);
         }
 
+        // The season seed. Whoever picks the seed picks every outcome the
+        // season will produce, so it is taken from the environment rather than
+        // derived here -- and publishing it must happen BEFORE the seed is
+        // committed, or "committed before anyone acted on it" means nothing.
+        bytes32 seed = vm.envOr("SEASON_SEED", bytes32(0));
+        bool openNow = vm.envOr("OPEN_SEASON", uint256(0)) == 1;
+
         vm.startBroadcast(pk);
         deployed = new DeepWood(treasury, hunter);
         if (gameToken != address(0)) {
@@ -75,9 +82,24 @@ contract Deploy is Script {
             // arming it is a deliberate post-graduation action.
             deployed.setToken(gameToken);
         }
+        if (seed != bytes32(0)) {
+            deployed.commitSeed(seed);
+        }
+        if (openNow) {
+            // Refuses without a seed, which is the point: do not open a season
+            // whose results are not yet fixed.
+            deployed.openSeason();
+        }
         vm.stopBroadcast();
 
         console.log("DeepWood deployed at:", address(deployed));
+        // console.log has no bytes32 overload, so print it as a number.
+        console.log("season seed        :", uint256(deployed.seasonSeed()));
+        console.log("seed committed     :", deployed.seasonSeed() != bytes32(0));
+        console.log("season open        :", deployed.seasonOpen());
+        if (!deployed.seasonOpen()) {
+            console.log("season is CLOSED -- open it with: cast send <addr> openSeason()");
+        }
         console.log("owner              :", deployed.owner());
         console.log("token wired        :", deployed.token());
         console.log("token rail enabled :", deployed.tokenRailEnabled());
