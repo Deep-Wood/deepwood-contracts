@@ -163,6 +163,33 @@ A whale with 10,000 ETH who plays *identically* to a player with 1 ETH posts an
 **identical** ROI. They get there sooner. That is the entire difference, and it
 is a fair one.
 
+### What open settlement changed, precisely
+
+Settlement is verified against a season seed committed on chain before any hunt,
+and the result is derived from `(seed, season, player, hunt index)`. So two
+players playing *identically* no longer receive the *identical* find -- they
+receive independent draws from the same distribution.
+
+The fairness claim above survives intact, because it was never about individual
+outcomes. The drop table depends on tool tier alone (rule 2), so expected
+rarity-weight per ETH spent is unchanged: identical ROI in expectation, and the
+whale still gets there sooner by hunting more. What changed is only that per-hunt
+results are now *independent* rather than identical.
+
+Two consequences worth stating plainly rather than burying:
+
+- **Per-roll equality is gone.** Two players can play identically and see
+  different finds. Anyone reading "identical ROI" as "the same find" would be
+  wrong.
+- **The seed publisher chooses the outcome set.** Committing a seed binds the
+  season's randomness, so nobody can rewrite history after players have acted --
+  but whoever commits it decides what the season contains. Commit-before-hunt
+  prevents *selection*; it does not by itself prove the seed was chosen fairly.
+  Publish the seed before committing it, or that guarantee is empty.
+
+This is a deliberate trade of per-roll equality for the removal of the keeper:
+open settlement means no trusted party, and independence is the price.
+
 ---
 
 ## 9. Season leaderboard
