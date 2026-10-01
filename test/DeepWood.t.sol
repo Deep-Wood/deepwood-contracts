@@ -40,6 +40,13 @@ contract DeepWoodTest is Test {
         dw.commitSeason(bytes32(uint256(0xC0FFEE)));
         vm.prank(hunter);
         dw.commitSeed(SEED);
+        // Season 1 now starts CLOSED (the constructor no longer auto-opens it),
+        // so a test that wants hunts to settle has to open it deliberately --
+        // exactly as the owner has to on a real deployment. Without this line
+        // 16 tests fail with SeasonNotOpen, which is the gate doing its job
+        // rather than a regression. No prank needed: this test contract deploys
+        // the game, so it IS the owner.
+        dw.openSeason();
     }
 
     /// @notice Settle one hunt the way a player now does: read the result the

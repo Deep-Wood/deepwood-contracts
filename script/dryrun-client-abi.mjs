@@ -71,6 +71,8 @@ const send = (sig, args, who) =>
 
 send('"commitSeason(bytes32)(bytes32)"', "0x" + "12".repeat(32), HUNTER);
 send('"commitSeed(bytes32)(bytes32)"', "0x" + "ab".repeat(32), HUNTER);
+// Season 1 starts CLOSED; arm it so the settlement path is actually reachable.
+send('"openSeason()(bool)"', "", ALICE); // ALICE deployed it, so ALICE owns it
 send('"claimTool(uint8)(uint8)"', "1", ALICE);
 
 // --- the client's own encoder, driven exactly as the app would ---------

@@ -4,3 +4,6 @@ node_modules/
 broadcast/
 .env
 deployments/
+
+# deployer key -- never commit
+.deploy.env

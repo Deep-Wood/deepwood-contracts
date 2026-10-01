@@ -397,6 +397,9 @@ function test_TokenRedemptionRefusesIfContractIsUnderfunded() public {
         dw.commitSeason(bytes32(uint256(0xC0FFEE)));
         vm.prank(hunter);
         dw.commitSeed(SEED);
+        // Season 1 starts closed; anything that settles a hunt must arm it
+        // first, exactly as an owner would on a real deployment.
+        dw.openSeason();
     }
 
     function _cd() internal {
@@ -433,6 +436,10 @@ contract SeasonOpenGateTest is Test {
         dw.commitSeason(bytes32(uint256(0xC0FFEE)));
         dw.commitSeed(keccak256("season-open-gate"));
         vm.stopPrank();
+        // The constructor no longer opens season 1, so this suite has to arm it
+        // to exercise settlement. Tests that assert the CLOSED state construct
+        // their own instance rather than relying on this one.
+        dw.openSeason();
         vm.prank(alice);
         dw.claimTool(1);
     }
@@ -453,8 +460,48 @@ contract SeasonOpenGateTest is Test {
         vm.warp(block.timestamp + 100);
     }
 
-    function test_SeasonOneIsOpenSoTheGameWorksImmediately() public {
-        assertTrue(dw.seasonOpen(), "a fresh deployment must accept hunts");
+    /// @notice A fresh deployment must land PAUSED.
+    /// @dev This assertion is the opposite of what it used to be, and the
+    ///      reversal is the point. The constructor used to set seasonOpen=true,
+    ///      which silently defeated Deploy.s.sol's OPEN_SEASON=0 -- caught on a
+    ///      real testnet deploy that reported `season open: true` after being
+    ///      asked for closed. A deployment is now a thing you arm on purpose.
+    ///      Free play is unaffected: this gate only covers settlement.
+    /// @dev Own instance: this suite's setUp opens the season on purpose, so
+    ///      `dw` cannot show what a fresh deployment looks like.
+    function test_FreshDeploymentIsPausedUntilOwnerOpensIt() public {
+        DeepWood fresh = new DeepWood(address(0xCAFE), hunter);
+        assertFalse(fresh.seasonOpen(), "a fresh deployment must NOT accept hunts");
+    }
+
+    function test_FreshDeploymentRejectsSettlementUntilOpened() public {
+        DeepWood fresh = new DeepWood(address(0xCAFE), hunter);
+        // A seed is needed so the failure we are testing is the SEASON gate and
+        // not the seed gate -- previewHunt legitimately refuses without one.
+        vm.prank(hunter);
+        fresh.commitSeed(bytes32(uint256(0xBEEF)));
+        _pastCooldown();
+        vm.prank(alice);
+        fresh.claimTool(1);
+        (uint256[5] memory c, uint256 best) = fresh.previewHunt(alice, 1);
+        vm.prank(alice);
+        vm.expectRevert(DeepWood.SeasonNotOpen.selector);
+        fresh.settleHunt(alice, 1, c, best, "");
+    }
+
+    function test_OwnerCanOpenTheSeasonAfterCommittingASeed() public {
+        dw.closeSeason();
+        dw.openSeason();
+        assertTrue(dw.seasonOpen(), "closing then re-opening must restore play");
+    }
+
+    /// @dev Uses its OWN contract instance: this suite's setUp already commits a
+    ///      seed and opens the season, so it cannot demonstrate the no-seed path.
+    function test_CannotOpenASeasonWithNoSeed() public {
+        DeepWood fresh = new DeepWood(address(0xCAFE), hunter);
+        vm.prank(owner);
+        vm.expectRevert(DeepWood.SeedNotCommitted.selector);
+        fresh.openSeason();
     }
 
     function test_CloseStopsSettlementImmediately() public {
@@ -472,6 +519,7 @@ contract SeasonOpenGateTest is Test {
         _pastCooldown();
         vm.startPrank(owner);
         dw.closeSeason();
+        assertFalse(dw.seasonOpen(), "close must take effect immediately");
         dw.openSeason();
         vm.stopPrank();
         assertTrue(dw.seasonOpen());
@@ -521,6 +569,8 @@ contract SeasonOpenGateTest is Test {
         dw.openSeason();
     }
 
+    /// @dev setUp already opened the season, so the SECOND open is the one that
+    ///      must revert. Opening twice in a row should not silently succeed.
     function test_OpeningTwiceReverts() public {
         vm.prank(owner);
         vm.expectRevert(DeepWood.AlreadyCommitted.selector);

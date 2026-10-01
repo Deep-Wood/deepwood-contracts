@@ -40,6 +40,10 @@ contract RollParityTest is Test {
         dw = new DeepWood(address(this), address(this));
         dw.commitSeason(bytes32(uint256(0xC0FFEE)));
         dw.commitSeed(SEED); // = keccak256("deepwood-season-1-seed")
+        // Season 1 starts closed now, and these vectors settle hunts -- so arm
+        // it the way an owner would. Without this every parity settlement
+        // reverts SeasonNotOpen, which is the gate working, not a parity fault.
+        dw.openSeason();
 
 rows.push(Roll(address(uint160(919791448120245735144748008190597589268974010368)), 1, 0, [uint256(4), 0, 0, 0, 0], 50000000000000));
         rows.push(Roll(address(uint160(919791448120245735144748008190597589268974010368)), 2, 0, [uint256(4), 0, 0, 0, 0], 50000000000000));

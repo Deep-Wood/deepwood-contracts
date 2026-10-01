@@ -80,6 +80,10 @@ const SEED = "0x" + keccak256("deepwood-dryrun-season-1");
 // and the reason the first runs failed with no visible error.
 send(addr, "commitSeason(bytes32)(bytes32)", ["0x" + "12".repeat(32)], HUNTER);
 send(addr, "commitSeed(bytes32)(bytes32)", [SEED], HUNTER);
+// Season 1 starts CLOSED now, so the harness must arm it the way an owner
+// would. Without this every settle reverts SeasonNotOpen -- the gate working,
+// not a settlement fault.
+send(addr, "openSeason()(bool)", [], ALICE); // ALICE is the deployer, so it owns the contract
 
 const seedOnChain = call(addr, "seasonSeed()");
 check("seed is readable on-chain", seedOnChain.toLowerCase() === SEED.toLowerCase(), seedOnChain);

@@ -324,8 +324,18 @@ contract DeepWood {
             baseSlots: 1,
             maxSlots: 4
         });
+        // Season 1 starts CLOSED.
+        //
+        // This line used to be `seasonOpen = true`, and it made the whole gate
+        // decorative: Deploy.s.sol's OPEN_SEASON flag only guarded the explicit
+        // openSeason() call, so a deploy with OPEN_SEASON=0 still came up live.
+        // That was caught on the real testnet deployment -- the contract
+        // reported `season open: true` straight after a deploy that asked for
+        // closed, and had to be closed by hand.
+        //
+        // Opening now requires a committed seed (openSeason reverts without one)
+        // and a deliberate owner call. Nothing settles until both happen.
         _startSeason(1);
-        seasonOpen = true; // season 1 opens with the contract, as it always has
     }
 
     modifier onlyOwner() {
