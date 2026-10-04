@@ -26,3 +26,10 @@ optimizer_runs = 1
 #   forge script script/CheckSize.s.sol
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+# `storageLayout` is required by forge-std's `stdStorage.find`, which locates a
+# mapping slot by reflecting on the compiled layout instead of hand-counting
+# slot numbers. Without it, a test helper that writes gem balances has to guess
+# the slot -- and a wrong guess silently writes to unused storage, so every
+# assertion downstream passes for the wrong reason.
+extra_output = ["storageLayout"]
