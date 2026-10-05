@@ -17,6 +17,12 @@ libs = ["lib"]
 optimizer = true
 optimizer_runs = 1
 
+# settleBatch carries more live locals than the legacy stack slot budget allows
+# (counts + bestWei + tool + p + cap + roll temporaries). The IR pipeline lifts
+# that limit at the cost of a slower compile -- the right trade for a contract
+# touched a handful of times per season.
+via_ir = true
+
 # Fail the build if any contract would be undeployable. `forge test` does NOT
 # enforce EIP-170 -- it compiles and runs happily on an oversized contract, so
 # the size regression passed a fully green 86-test suite and was only caught by
