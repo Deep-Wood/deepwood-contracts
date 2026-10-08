@@ -1559,19 +1559,33 @@ contract DeepWoodV4 {
     }
 
     /// @notice Get the current ETH per DEEPWOOD token price
-    /// @dev Converts sqrtPriceX96 to ETH/token with 18 decimal precision
+    /// @dev Converts sqrtPriceX96 to ETH/token, returned in 1e18 FIXED POINT
+    ///      (i.e. the value is "wei of ETH per token" scaled up by 1e18). The
+    ///      1e18 scale is REQUIRED: the naive (Q96*Q96)/(sqrt*sqrt) underflows
+    ///      to 0 whenever the pool prices the token below 1 ETH (sqrtPriceX96 >
+    ///      Q96), and that 0 then divides by zero downstream in
+    ///      buyToolWithToken (Panic 0x12). Scaling the numerator by 1e18 keeps
+    ///      integer precision across the full uint256 range so a real sub-ETH
+    ///      token price survives. Callers multiply a wei cost by 1e18 and divide
+    ///      by this to recover a token amount in 1e18 units.
     function getEthPerToken() public view returns (uint256) {
         uint160 sqrtPriceX96 = readSqrtPriceX96();
         if (sqrtPriceX96 == 0) revert ZeroAmount();
         uint256 Q96 = 2 ** 96;
         // sqrtPriceX96 = sqrt(token/eth) * 2^96
         // eth/token = (2^96 / sqrtPriceX96)^2
-        uint256 ethPerToken = (Q96 * Q96) / (uint256(sqrtPriceX96) * uint256(sqrtPriceX96));
+        // FIXED POINT: scale the numerator by 1e18 so the division does not
+        // underflow to zero for sub-ETH token prices.
+        uint256 ethPerToken = (Q96 * Q96 * 1e18) / (uint256(sqrtPriceX96) * uint256(sqrtPriceX96));
+        if (ethPerToken == 0) revert ZeroAmount();
         return ethPerToken;
     }
 
     /// @notice Get the current DEEPWOOD per ETH price
     function getTokensPerEth() public view returns (uint256) {
+        // ethPerToken is 1e18-scaled (eth per token, fixed point). Invert to
+        // tokens per ETH in the same 1e18 fixed point: 1e18 / (ethPerToken/1e18)
+        // == (1e18 * 1e18) / ethPerToken.
         uint256 ethPerToken = getEthPerToken();
         if (ethPerToken == 0) revert ZeroAmount();
         return (1e18 * 1e18) / ethPerToken;
@@ -1597,12 +1611,18 @@ contract DeepWoodV4 {
         if (nonce != buyNonce[msg.sender]) revert BadNonce();
 
         // Read on-chain price
-        uint256 ethPerToken = getEthPerToken();
+        uint256 ethPerToken = getEthPerToken(); // 1e18-scaled (eth per token)
         uint256 cost = toolCost(tier);
 
-        // Calculate token cost with 10% discount
-        // tokenCost = cost * (1 - discount) / ethPerToken
-        uint256 tokenCost = (cost * TOKEN_DISCOUNT_BPS) / (ethPerToken * BPS_DENOMINATOR / 10000);
+        // Calculate token cost with 10% discount.
+        // ethPerToken is 1e18-scaled, so recover the token amount in 1e18 units:
+        //   tokenCost = (discounted ETH cost in wei) * 1e18 / ethPerToken
+        // where discounted ETH cost = cost * TOKEN_DISCOUNT_BPS / BPS_DENOMINATOR
+        // (TOKEN_DISCOUNT_BPS = 9000 => 10% off). The old expression divided by
+        // `ethPerToken * BPS_DENOMINATOR / 10000` -- a no-op scale AND a
+        // division by an ethPerToken that underflowed to 0 (Panic 0x12).
+        uint256 discountedCost = (cost * TOKEN_DISCOUNT_BPS) / BPS_DENOMINATOR;
+        uint256 tokenCost = (discountedCost * 1e18) / ethPerToken;
 
         // Price sanity check: maxTokenCost must be within ±20% of on-chain price
         uint256 minCost = tokenCost * (BPS_DENOMINATOR - PRICE_TOLERANCE_BPS) / BPS_DENOMINATOR;
