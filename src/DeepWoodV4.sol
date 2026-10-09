@@ -204,6 +204,7 @@ contract DeepWoodV4 {
         address indexed to
     );
     event MigratedFromV3(address indexed player);
+    event GemsGranted(address indexed player, Rarity rarity, uint256 amount);
 
     // V4 errors
     error Reentrancy();
@@ -1739,7 +1740,43 @@ contract DeepWoodV4 {
             skillOf[player] = abi.decode(data, (uint8));
         }
 
+        // Copy the per-rarity satchel.
+        //
+        // This block was missing from the original migration, so every player
+        // migrated with their tool, hunts and score intact but an EMPTY
+        // satchel: their gems stayed on V3 and the new game showed 0 of each.
+        // Stats alone are not state -- the satchel is what the player can
+        // actually spend, redeem and repair with, so leaving it out silently
+        // destroyed playable inventory rather than merely a display.
+        for (uint256 r = 0; r < 5; r++) {
+            (success, data) = V3_CONTRACT.staticcall(
+                abi.encodeWithSignature("gemsOf(address,uint8)", player, r)
+            );
+            if (success) {
+                uint256 held = abi.decode(data, (uint256));
+                if (held > 0) p.gems[Rarity(r)] = held;
+            }
+        }
+
         emit MigratedFromV3(player);
+    }
+
+    /// @notice Owner-only gem credit.
+    ///
+    /// Exists because the first V4 deploy shipped migrateFromV3 WITHOUT the
+    /// satchel copy, and a contract already deployed cannot be taught a new
+    /// behaviour. Any player whose V3 satchel was lost in that migration can be
+    /// credited exactly what V3 still holds for them.
+    ///
+    /// Deliberately additive and never subtractive: it cannot remove a gem a
+    /// player legitimately earned on V4, so a mistaken call can only over-credit,
+    /// never confiscate. Events make every call auditable.
+    function grantGems(address player, uint8 rarity, uint256 amount) external onlyOwner {
+        if (player == address(0)) revert NotOwner();
+        if (rarity > 4) revert BadConfig();
+        _p[player].gems[Rarity(rarity)] += amount;
+        _p[player].totalGemsEarned += amount;
+        emit GemsGranted(player, Rarity(rarity), amount);
     }
 
     /// @notice Mark migration as completed (no more migrations allowed)
