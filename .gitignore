@@ -7,3 +7,6 @@ deployments/
 
 # deployer key -- never commit
 .deploy.env
+
+# V4 deploy env -- carries the deployer key, never commit
+.deploy.v4.env
