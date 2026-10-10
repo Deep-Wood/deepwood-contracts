@@ -256,7 +256,7 @@ contract DeepWoodV4 {
     // State
     // =====================================================================
 
-    address public immutable TREASURY;
+    address public TREASURY;
     address public immutable HUNTER_ROLE;
 
     /// @notice Owner of the game contract. May retune the economy, wire or
@@ -344,6 +344,10 @@ contract DeepWoodV4 {
     /// @notice ETH held backing all outstanding gems. Never fully withdrawn:
     ///         burned gem value stays here as permanent surplus (R3).
     uint256 public ethBacking;
+    /// @notice $DEEPWOOD held backing token redemptions. Tool purchases with
+    ///         tokens keep the tokens here (like ethBacking) instead of
+    ///         forwarding to treasury, so the contract can pay out redemptions.
+    uint256 public tokenBacking;
     /// @notice Top rarity this player's skill level permits them to find.
     ///         Tool tier gates the CEILING (drop table); skill gates the floor
     ///         of what's findable at all. Both must permit a rarity (SPEC §7).
@@ -360,7 +364,7 @@ contract DeepWoodV4 {
     event ToolRepaired(address indexed player, uint8 tier, uint256 gemsBurned);
     event HuntSettled(address indexed player, uint256 totalGems, uint256 valueWei, uint256 huntCostWei);
     event SkillUpgraded(address indexed player, uint256 gemsSpent, uint256 burnFee);
-    event GemsRedeemed(address indexed player, Rarity rarity, uint256 gems, uint256 ethPaid);
+    event GemsRedeemed(address indexed player, Rarity rarity, uint256 gems, uint256 tokenPaid);
     event SeasonCommitted(uint64 indexed seasonId, bytes32 root);
     event SeasonSeedCommitted(uint64 indexed seasonId, bytes32 seed);
     event SeasonFinalized(uint64 indexed seasonId);
@@ -376,9 +380,11 @@ contract DeepWoodV4 {
     event PausedStateChanged(bool paused);
     event TokenSet(address indexed token);
     event TokenRailChanged(bool enabled);
+    event TreasurySet(address indexed treasury);
     event OwnershipTransferred(address indexed from, address indexed to);
 
     error NotHunter();
+    error ZeroAddress();
     error NotOwner();
     error Paused();
     error BadConfig();
@@ -1347,6 +1353,15 @@ contract DeepWoodV4 {
         emit TokenSet(t);
     }
 
+    /// @notice Update the treasury address. Treasury was immutable in V4.1;
+    ///         making it settable so fees can be redirected without a redeploy.
+    /// @param t New treasury address (must not be zero)
+    function setTreasury(address t) external onlyOwner {
+        if (t == address(0)) revert ZeroAddress();
+        TREASURY = t;
+        emit TreasurySet(t);
+    }
+
     /// @notice Turn token redemption on or off. Independent of `token` being
     ///         set, so the owner can pre-configure the address and flip the
     ///         rail only at launch.
@@ -1360,6 +1375,11 @@ contract DeepWoodV4 {
     function fundToken(uint256 amount) external onlyOwner {
         if (token == address(0)) revert NoToken();
         if (!IERC20(token).transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
+        // Credit the tracked backing. Without this the tokens sit in the
+        // contract untracked, `tokenBacking` understates what is available,
+        // and `emergencyWithdraw`'s solvency guard would treat them as
+        // withdrawable surplus.
+        tokenBacking += amount;
     }
 
     /// @notice Hand the game contract to a new owner (a multisig, later).
@@ -1461,9 +1481,15 @@ contract DeepWoodV4 {
         if (!tokenRedemptionActive()) revert TokenRailLocked();
         if (token == address(0)) revert NoToken();
         if (IERC20(token).decimals() != 18) revert BadConfig();
-        uint256 owed = payout / PRICE_SCALE;
+        // `payout` is ETH-denominated (wei); convert to $DEEPWOOD at the pool
+        // price. getEthPerToken() is 1e18-scaled, so scale the wei up by 1e18
+        // before dividing -- otherwise the payout would be paid 1:1 in token
+        // units, mispricing redemption by the whole price ratio.
+        uint256 owed = (payout * 1e18) / getEthPerToken();
+        if (owed == 0) revert ZeroAmount();
         if (IERC20(token).balanceOf(address(this)) < owed) revert InsufficientTokenBalance();
         p.gems[rarity] -= gems;
+        tokenBacking = tokenBacking > owed ? tokenBacking - owed : 0;
         if (!IERC20(token).transfer(msg.sender, owed)) revert TransferFailed();
         emit GemsRedeemed(msg.sender, rarity, gems, owed);
     }
@@ -1474,6 +1500,17 @@ contract DeepWoodV4 {
     function redeemQuote(Rarity rarity, uint256 gems) external view returns (uint256 payout, bool aboveFloor) {
         payout = (gems * priceOf(rarity) * redeemPayoutBps()) / BPS_DENOMINATOR;
         aboveFloor = payout >= minRedeemWei();
+    }
+
+    /// @notice $DEEPWOOD `gems` of `rarity` would pay out, converted at the
+    ///         live pool price. Mirrors the conversion inside `redeemGems` so
+    ///         the UI can display the exact token amount without reimplementing
+    ///         the price maths (and drifting from it).
+    function redeemQuoteToken(Rarity rarity, uint256 gems) external view returns (uint256 tokens, bool aboveFloor) {
+        uint256 payout = (gems * priceOf(rarity) * redeemPayoutBps()) / BPS_DENOMINATOR;
+        aboveFloor = payout >= minRedeemWei();
+        if (payout == 0) return (0, aboveFloor);
+        tokens = (payout * 1e18) / getEthPerToken();
     }
 
     // =====================================================================
@@ -1633,14 +1670,22 @@ contract DeepWoodV4 {
         // Increment nonce (replay protection)
         buyNonce[msg.sender]++;
 
-        // Pull tokens from player
+        // Pull tokens from player. Unlike V4.1 -- which forwarded the whole
+        // amount to TREASURY and left the contract with a zero balance, making
+        // every redemption revert InsufficientTokenBalance -- the contract now
+        // KEEPS the backing portion so it can actually pay redemptions. Only
+        // the burn fee (same bps as the ETH path) goes to treasury.
         if (token == address(0)) revert NoToken();
         bool ok = IERC20(token).transferFrom(msg.sender, address(this), tokenCost);
         if (!ok) revert TransferFailed();
 
-        // Forward tokens to treasury
-        ok = IERC20(token).transfer(TREASURY, tokenCost);
-        if (!ok) revert TransferFailed();
+        uint256 tokenFee = (tokenCost * config.burnFeeBps) / BPS_DENOMINATOR;
+        uint256 kept = tokenCost - tokenFee;
+        tokenBacking += kept; // track only what the contract actually holds
+        if (tokenFee > 0) {
+            ok = IERC20(token).transfer(TREASURY, tokenFee);
+            if (!ok) revert TransferFailed();
+        }
 
         // Update player state (same as buyTool)
         Tool storage held = _held[msg.sender];
@@ -1679,9 +1724,17 @@ contract DeepWoodV4 {
             (bool ok,) = to.call{ value: amount }("");
             if (!ok) revert TransferFailed();
         } else {
-            // Token withdrawal
+            // Token withdrawal. Cannot touch the redemption backing: those
+            // tokens are owed to players holding gems, and letting the owner
+            // pull them would silently break every outstanding redemption.
+            if (tokenAddress == token && amount > tokenBacking) {
+                revert InsufficientTokenBalance();
+            }
             bool ok = IERC20(tokenAddress).transfer(to, amount);
             if (!ok) revert TransferFailed();
+            if (tokenAddress == token) {
+                tokenBacking -= amount;
+            }
         }
 
         emit EmergencyWithdraw(tokenAddress, amount, to);
