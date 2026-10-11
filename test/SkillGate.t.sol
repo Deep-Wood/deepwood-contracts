@@ -32,6 +32,7 @@ contract SkillGateTest is Test {
     bytes32 internal constant SEED = keccak256("deepwood-v4-preseason");
 
     address internal alice = address(0xA11CE);
+    address internal bob = address(0xB0B);
 
     function setUp() public {
         dw = new DeepWoodV5(TREASURY, HUNTER, POOL_MANAGER, POOL_ID, address(0));
@@ -270,13 +271,65 @@ contract SkillGateTest is Test {
         dw.migrateFromV2(alice, 2, uint64(dw.durabilityOf(2)), [uint256(0), 0, 0, 0, 0]);
         assertEq(dw.skillOf(alice), 0, "legacy player starts at skill 0");
 
+        // The levels are charged, so the player must hold the Quartz. trader2
+        // has 321 on the live contract, comfortably over the 200 for level 1.
+        _grantQuartz(alice, 321);
+
         dw.syncSkill(alice);
         assertEq(dw.skillOf(alice), 1, "raised to the tier-1 floor");
+        assertEq(dw.gemsOf(alice, DeepWoodV5.Rarity.Common), 121,
+            "level 1 cost its normal 200 Quartz");
         assertTrue(dw.rarityUnlocked(alice, DeepWoodV5.Rarity.Uncommon), "amber unlocked");
 
-        // Raise-only: calling again must not lower anything.
+        // Raise-only: calling again must not lower anything, and must not
+        // charge again now that the floor is met.
         dw.syncSkill(alice);
         assertEq(dw.skillOf(alice), 1);
+        assertEq(dw.gemsOf(alice, DeepWoodV5.Rarity.Common), 121, "no second charge");
+    }
+
+    /// syncSkill must cost EXACTLY what upgradeSkill costs -- not a discount,
+    /// or it would be a cheaper route to the same level for anyone the owner
+    /// is willing to call it for.
+    function test_SyncSkillCostsTheSameAsUpgrading() public {
+        // alice walks the ladder normally to skill 1.
+        _grantQuartz(alice, 1_000);
+        _buyTier(alice, 1);
+        vm.prank(alice);
+        dw.upgradeSkill(1);
+        uint256 aliceLeft = dw.gemsOf(alice, DeepWoodV5.Rarity.Common);
+
+        // bob is synced to the same level from the same starting balance.
+        dw.migrateFromV2(bob, 2, uint64(dw.durabilityOf(2)), [uint256(0), 0, 0, 0, 0]);
+        _grantQuartz(bob, 1_000);
+        dw.syncSkill(bob);
+        uint256 bobLeft = dw.gemsOf(bob, DeepWoodV5.Rarity.Common);
+
+        assertEq(dw.skillOf(bob), 1);
+        assertEq(bobLeft, aliceLeft, "syncing must not be cheaper than upgrading");
+    }
+
+    /// A player who cannot cover the cost reverts rather than being synced for
+    /// free. grantGems is the escape hatch for a genuinely broke legacy holder.
+    function test_SyncSkillRevertsWhenThePlayerCannotPay() public {
+        dw.migrateFromV2(alice, 2, uint64(dw.durabilityOf(2)), [uint256(0), 0, 0, 0, 0]);
+        _grantQuartz(alice, 199); // one short of the 200 needed
+
+        vm.expectRevert(DeepWoodV5.InsufficientGems.selector);
+        dw.syncSkill(alice);
+        assertEq(dw.skillOf(alice), 0, "no level granted without payment");
+    }
+
+    /// A tier-1 holder is charged for the level-1 floor too -- there is no
+    /// free path to a skill level through syncSkill.
+    function test_SyncSkillChargesTierOneHolders() public {
+        _buyTier(alice, 1);
+        assertEq(dw.skillOf(alice), 0);
+        _grantQuartz(alice, 200);
+
+        dw.syncSkill(alice);
+        assertEq(dw.skillOf(alice), 1);
+        assertEq(dw.gemsOf(alice, DeepWoodV5.Rarity.Common), 0, "charged the full 200");
     }
 
     /// syncSkill can never take a level away, so it cannot confiscate one
@@ -290,9 +343,12 @@ contract SkillGateTest is Test {
         vm.prank(alice);
         dw.buyTool{value: cost}(2);
         assertEq(dw.skillOf(alice), 1);
+        uint256 before = dw.gemsOf(alice, DeepWoodV5.Rarity.Common);
 
         dw.syncSkill(alice);
         assertEq(dw.skillOf(alice), 1, "must not lower a purchased level");
+        assertEq(dw.gemsOf(alice, DeepWoodV5.Rarity.Common), before,
+            "and must not charge when the floor is already met");
     }
 
     function test_SyncSkillOnlyOwner() public {

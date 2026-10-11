@@ -366,7 +366,7 @@ contract DeepWoodV5 {
     event ToolRepaired(address indexed player, uint8 tier, uint256 gemsBurned);
     event HuntSettled(address indexed player, uint256 totalGems, uint256 valueWei, uint256 huntCostWei);
     event SkillUpgraded(address indexed player, uint256 gemsSpent, uint256 burnFee);
-    event SkillSynced(address indexed player, uint8 skill);
+    event SkillSynced(address indexed player, uint8 skill, uint256 gemsSpent, uint256 burnFee);
     event GemsRedeemed(address indexed player, Rarity rarity, uint256 gems, uint256 tokenPaid);
     event SeasonCommitted(uint64 indexed seasonId, bytes32 root);
     event SeasonSeedCommitted(uint64 indexed seasonId, bytes32 seed);
@@ -2021,23 +2021,37 @@ contract DeepWoodV5 {
     /// deployed contract cannot be taught a new invariant retroactively, so
     /// this raises them to the floor the interlock demands.
     ///
+    /// The levels are NOT free. Each one costs exactly what upgradeSkill would
+    /// have charged, burned from the player's own Quartz, so a synced player
+    /// ends up in the same position as one who walked the ladder normally --
+    /// otherwise this would be a discount anyone could route through the owner.
+    /// If the player cannot cover the total it reverts, exactly as
+    /// upgradeSkill does; grantGems() is the escape hatch when a legacy holder
+    /// is short.
+    ///
     /// Deliberately raise-only: it can never LOWER a skill, so it cannot
-    /// confiscate a level anyone bought. Level 1 is included because
-    /// maxFindableRarity treats below-2 as the Amber ceiling, making level 1
-    /// inert -- a player parked at 0 gains nothing from being raised to 1, but
-    /// a tier-2 holder needs it for the interlock to read correctly.
+    /// confiscate a level anyone bought.
     function syncSkill(address player) external onlyOwner {
         uint8 tier = _held[player].tier;
         if (tier == 0) revert ToolNotOwned();
         uint8 floorSkill = tier > 1 ? tier - 1 : 1;
-        if (skillOf[player] >= floorSkill) return;
+        uint8 cur = skillOf[player];
+        if (cur >= floorSkill) return;
+
+        // Charge for every level crossed, at the normal price.
+        uint256 cost;
+        for (uint8 s = cur + 1; s <= floorSkill; ++s) {
+            cost += skillCost(s);
+        }
+        uint256 burn = _burn(player, cost);
+
         skillOf[player] = floorSkill;
         rarityUnlocked[player][Rarity.Common] = true;
         rarityUnlocked[player][Rarity.Uncommon] = true;
         if (floorSkill >= 2) rarityUnlocked[player][Rarity.Rare] = true;
         if (floorSkill >= 3) rarityUnlocked[player][Rarity.Epic] = true;
         if (floorSkill >= 4) rarityUnlocked[player][Rarity.Legendary] = true;
-        emit SkillSynced(player, floorSkill);
+        emit SkillSynced(player, floorSkill, cost, burn);
     }
 
     /// @notice Mark migration as completed (no more migrations allowed)
