@@ -1237,25 +1237,25 @@ contract DeepWoodV4 {
         uint256[5] memory table = dropTable(toolTier);
 
         bytes32 h = keccak256(abi.encodePacked(seed, bytes32(uint256(huntIndex)), _lowerHex(player)));
-        uint256 gemCount = 3 + (uint256(uint8(h[0])) % 3); // 3, 4 or 5
+        // Roll ONE rarity per hunt, then multiply. Mixing rarities in a single
+        // dig made the outcome confusing -- "1 quartz + 3 sapphires" is hard to
+        // read and impossible to value at a glance. A hunt now picks a single
+        // tier and rolls 1-5 of that same gem.
+        uint256 gemCount = 1 + (uint256(uint8(h[0])) % 5); // 1, 2, 3, 4 or 5
 
-        for (uint256 i = 0; i < gemCount; i++) {
-            bytes32 gb = keccak256(abi.encodePacked(h, uint256(toolTier), uint8(i)));
-            uint256 roll = (((uint256(uint8(gb[0])) << 16) | (uint256(uint8(gb[1])) << 8) | uint256(uint8(gb[2]))) % 10000);
-
-            uint256 acc = 0;
-            uint256 picked = 4;
-            for (uint256 r = 0; r < 5; r++) {
-                acc += table[r];
-                if (roll < acc) {
-                    picked = r;
-                    break;
-                }
+        // Pick the rarity for this entire hunt.
+        uint256 rarityRoll = (((uint256(uint8(h[1])) << 16) | (uint256(uint8(h[2])) << 8) | uint256(uint8(h[3]))) % 10000);
+        uint256 acc = 0;
+        uint256 picked = 4;
+        for (uint256 r = 0; r < 5; r++) {
+            acc += table[r];
+            if (rarityRoll < acc) {
+                picked = r;
+                break;
             }
-            counts[picked] += 1;
-            uint256 pv = priceOf(Rarity(picked));
-            if (pv > bestSingleWei) bestSingleWei = pv;
         }
+        counts[picked] = gemCount;
+        bestSingleWei = priceOf(Rarity(picked));
     }
 
     /// @notice The result this player's next hunt WILL settle as.
