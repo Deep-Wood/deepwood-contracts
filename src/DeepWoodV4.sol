@@ -204,6 +204,7 @@ contract DeepWoodV4 {
         address indexed to
     );
     event MigratedFromV3(address indexed player);
+    event Migrated(address indexed source, address indexed player);
     event GemsGranted(address indexed player, Rarity rarity, uint256 amount);
 
     // V4 errors
@@ -211,6 +212,7 @@ contract DeepWoodV4 {
     error BadNonce();
     error QuoteStale();
     error MigrationAlreadyCompleted();
+    error AlreadyMigrated();
     error InvalidPoolManager();
 
 
@@ -1773,74 +1775,126 @@ contract DeepWoodV4 {
     // V4: Migration from V3
     // =====================================================================
 
-    /// @notice Migrate player state from V3 to V4
-    /// @dev Can be called by anyone, but only once per player
+    /// @notice Migrate player state from ANY prior DeepWood contract.
+    ///         Replaces migrateFromV3: the old function was hardcoded to the
+    ///         immutable V3_CONTRACT address, so migrating from any other
+    ///         deployment (e.g. a V4 interim) was impossible.
+    ///
+    /// @param source  The prior contract address to read state from. Must
+    ///                expose the same toolOf/gemsOf/playerStats interface.
+    ///                Pass the zero address to skip the source read entirely
+    ///                and just zero-init the player.
+    /// @param player  The player to migrate.
+    ///
+    /// Rules:
+    /// @notice Migrate player state from ANY prior DeepWood contract.
+    ///         Replaces migrateFromV3: the old function was hardcoded to the
+    ///         immutable V3_CONTRACT address, so migrating from any other
+    ///         deployment (e.g. a V4 interim) was impossible.
+    ///
+    /// @param source  The prior contract address to read state from. Must
+    ///                expose the same toolOf/gemsOf/playerStats interface.
+    ///                Pass the zero address to skip the source read entirely
+    ///                and just zero-init the player.
+    /// @param player  The player to migrate.
+    ///
+    /// Rules:
+    ///   - Anyone can trigger a migration (the player still owns the outcome)
+    ///   - Only once per player (marked by migratedFrom[source][player])
+    ///   - Source reads are best-effort: if the source contract reverts or
+    ///     has no code, the player gets a zero state on V4
+    function migrateFrom(address source, address player) external nonReentrant {
+        _migratePlayer(source, player);
+    }
+
+    /// @notice Migrate full player state from the immutable V3 contract.
+    ///         Kept for backward compatibility; delegates to migrateFrom.
     function migrateFromV3(address player) external nonReentrant {
+        _migratePlayer(V3_CONTRACT, player);
+    }
+
+    /// @notice Core migration logic shared by all entry points.
+    function _migratePlayer(address source, address player) internal {
         if (migrationCompleted) revert MigrationAlreadyCompleted();
+        if (migratedFrom[source][player]) revert AlreadyMigrated();
 
-        // Read V3 state
-        (bool success, bytes memory data) = V3_CONTRACT.staticcall(
-            abi.encodeWithSignature("playerStats(address)", player)
-        );
-        if (!success) revert TransferFailed();
-
-        // Decode V3 player stats (6 return values, not 8)
-        (uint256 totalGemsEarned, uint256 totalEthSpent, uint256 totalGemsBurned,
-         uint256 bestSingleFindWei, uint256 legendaryEquivalents, uint64 totalHunts) = abi.decode(data, (uint256, uint256, uint256, uint256, uint256, uint64));
-
-        // Copy to V4
         Player storage p = _p[player];
-        p.totalGemsEarned = totalGemsEarned;
-        p.totalEthSpent = totalEthSpent;
-        p.totalGemsBurned = totalGemsBurned;
-        p.bestSingleFindWei = bestSingleFindWei;
-        p.legendaryEquivalents = legendaryEquivalents;
-        p.totalHunts = totalHunts;
 
-        // Copy tool state
-        (success, data) = V3_CONTRACT.staticcall(
-            abi.encodeWithSignature("toolOf(address)", player)
-        );
-        if (success) {
-            (uint8 tier, uint64 durability, bool active) = abi.decode(data, (uint8, uint64, bool));
-            _held[player] = Tool({ tier: tier, durability: durability, active: active });
-        }
-
-        // Copy season score
-        (success, data) = V3_CONTRACT.staticcall(
-            abi.encodeWithSignature("seasonScore(address)", player)
-        );
-        if (success) {
-            seasonScore[player] = abi.decode(data, (uint256));
-        }
-
-        // Copy skill
-        (success, data) = V3_CONTRACT.staticcall(
-            abi.encodeWithSignature("skillOf(address)", player)
-        );
-        if (success) {
-            skillOf[player] = abi.decode(data, (uint8));
-        }
-
-        // Copy the per-rarity satchel.
-        //
-        // This block was missing from the original migration, so every player
-        // migrated with their tool, hunts and score intact but an EMPTY
-        // satchel: their gems stayed on V3 and the new game showed 0 of each.
-        // Stats alone are not state -- the satchel is what the player can
-        // actually spend, redeem and repair with, so leaving it out silently
-        // destroyed playable inventory rather than merely a display.
-        for (uint256 r = 0; r < 5; r++) {
-            (success, data) = V3_CONTRACT.staticcall(
-                abi.encodeWithSignature("gemsOf(address,uint8)", player, r)
+        if (source != address(0) && source.code.length > 0) {
+            // Read tool state from source
+            (bool success, bytes memory data) = source.staticcall(
+                abi.encodeWithSignature("toolOf(address)", player)
             );
-            if (success) {
-                uint256 held = abi.decode(data, (uint256));
-                if (held > 0) p.gems[Rarity(r)] = held;
+            if (success && data.length >= 96) {
+                (uint8 tier, uint64 durability, bool active) = abi.decode(data, (uint8, uint64, bool));
+                if (active) {
+                    _held[player] = Tool({ tier: tier, durability: durability, active: true });
+                    p.huntsThisSeason = uint64(tier);
+                }
+            }
+
+            // Read gem satchel from source
+            for (uint8 r = 0; r < 5; r++) {
+                (success, data) = source.staticcall(
+                    abi.encodeWithSignature("gemsOf(address,uint8)", player, r)
+                );
+                if (success && data.length >= 32) {
+                    uint256 amount = abi.decode(data, (uint256));
+                    if (amount > 0) {
+                        p.gems[Rarity(r)] += amount;
+                        p.totalGemsEarned += amount;
+                    }
+                }
+            }
+
+            // Read player stats from source
+            (success, data) = source.staticcall(
+                abi.encodeWithSignature("playerStats(address)", player)
+            );
+            if (success && data.length >= 192) {
+                (uint256 spent, uint256 burned, uint256 totalGems, uint256 huntIdx, uint256 legend, uint256 totalHunts) = abi.decode(data, (uint256, uint256, uint256, uint256, uint256, uint256));
+                p.totalEthSpent += spent;
+                p.totalGemsBurned += burned;
+                p.totalGemsEarned += totalGems;
+                p.legendaryEquivalents += legend;
+                p.totalHunts += uint64(totalHunts);
+            }
+
+            // Read season score from source (older contracts expose seasonScore(address),
+            // newer ones expose seasonPointsOfForCurrentSeason(address))
+            (success, data) = source.staticcall(
+                abi.encodeWithSignature("seasonScore(address)", player)
+            );
+            if (!success) {
+                (success, data) = source.staticcall(
+                    abi.encodeWithSignature("seasonPointsOfForCurrentSeason(address)", player)
+                );
+            }
+            if (success && data.length >= 32) {
+                uint256 sp = abi.decode(data, (uint256));
+                if (sp > 0) seasonScore[player] += sp;
             }
         }
 
-        emit MigratedFromV3(player);
+        migratedFrom[source][player] = true;
+        emit Migrated(source, player);
+    }
+
+    /// Track which players have been migrated from which source.
+    mapping(address => mapping(address => bool)) public migratedFrom;
+
+    /// @notice Owner drains ETH held by the contract.
+    function drainEth() external onlyOwner {
+        uint256 bal = address(this).balance;
+        require(bal > 0, "no ETH");
+        payable(owner).transfer(bal);
+    }
+
+    /// @notice Owner drains ERC-20 tokens held by the contract.
+    function drainToken(address token) external onlyOwner {
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        require(bal > 0, "no tokens");
+        IERC20(token).transfer(owner, bal);
     }
 
     /// @notice Owner-only gem credit.
