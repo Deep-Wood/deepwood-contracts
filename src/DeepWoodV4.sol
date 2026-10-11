@@ -366,6 +366,7 @@ contract DeepWoodV4 {
     event ToolRepaired(address indexed player, uint8 tier, uint256 gemsBurned);
     event HuntSettled(address indexed player, uint256 totalGems, uint256 valueWei, uint256 huntCostWei);
     event SkillUpgraded(address indexed player, uint256 gemsSpent, uint256 burnFee);
+    event SkillSynced(address indexed player, uint8 skill);
     event GemsRedeemed(address indexed player, Rarity rarity, uint256 gems, uint256 tokenPaid);
     event SeasonCommitted(uint64 indexed seasonId, bytes32 root);
     event SeasonSeedCommitted(uint64 indexed seasonId, bytes32 seed);
@@ -557,27 +558,41 @@ contract DeepWoodV4 {
         return 0;
     }
 
-    /// @notice Rarity weights per 10,000 for a tool tier - the CEILING.
+    /// @notice Rarity weights per 10,000 for a tool tier, as gated by skill.
     ///         Index = rarity (SPEC §2).
-    /// @dev Tier 1 was [9000, 1000, 0, 0, 0] -- 10% Amber at the entry tool,
-    ///      which contradicts "Amber unlocked by Bronze" and let a Wood player
-    ///      roll the tier-2 gem. Amber now starts at Bronze.
-    /// @notice Gold without Skill 4 finds NO Diamond (SPEC §2).
     /// @dev The gate lives HERE, in the roll, rather than only in
     ///      maxFindableRarity. The cap check rejects a claim above the player's
     ///      ceiling, but it does not stop a Gold table from ROLLING Diamond and
     ///      then reverting the whole settlement -- the player would just see
     ///      ResultMismatch/RarityLocked on a dig the contract itself produced.
-    ///      Substituting the table means an unskilled Gold hunt can never roll
-    ///      a gem it is not allowed to keep. Sums to 10,000 like every other
-    ///      row: the 200 Diamond weight is redistributed to Sapphire.
-    function dropTable(uint8 toolTier, uint8 skill) public pure returns (uint256[5] memory) {
-        if (toolTier <= 1) return [uint256(10_000), 0, 0, 0, 0];
-        if (toolTier == 2) return [uint256(6_000), 4_000, 0, 0, 0];
-        if (toolTier == 3) return [uint256(4_500), 3_500, 2_000, 0, 0];
-        if (toolTier == 4) return [uint256(3_500), 3_500, 2_400, 600, 0];
-        if (skill < 4) return [uint256(3_000), 3_000, 3_000, 1_000, 0];
-        return [uint256(3_000), 3_000, 2_500, 1_300, 200]; // tier 5, max skill
+    ///
+    ///      The gate REDIRECTS rather than zeros. Every rarity above the
+    ///      unlocked ceiling has its weight moved DOWN to Quartz, so:
+    ///        - a locked rarity can never be rolled, at any tier
+    ///        - the row still sums to 10,000 like every other row
+    ///        - an unskilled hunter gets 100% Quartz at EVERY tier, which is
+    ///          the designed floor: you always earn something, so you can
+    ///          always dig your way out of a low skill level.
+    ///
+    ///      Skill N unlocks Rarity(N): 1=Amber, 2=Sapphire, 3=Ruby,
+    ///      4=Diamond. A tier's own table is its ceiling; skill can only lower
+    ///      it. Since upgradeSkill requires targetSkill <= toolTier and
+    ///      buyTool requires skillOf >= tier-1, a player holding tier T always
+    ///      sits at skill T-1 or T -- so the highest rarity a tier can produce
+    ///      is always unlocked by the time they hold that tier's tool.
+    function dropTable(uint8 toolTier, uint8 skill) public pure returns (uint256[5] memory t) {
+        if (toolTier <= 1) t = [uint256(10_000), 0, 0, 0, 0];
+        else if (toolTier == 2) t = [uint256(6_000), 4_000, 0, 0, 0];
+        else if (toolTier == 3) t = [uint256(4_500), 3_500, 2_000, 0, 0];
+        else if (toolTier == 4) t = [uint256(3_500), 3_500, 2_400, 600, 0];
+        else t = [uint256(3_000), 3_000, 2_500, 1_300, 200];
+
+        for (uint8 r = 1; r <= 4; ++r) {
+            if (r > skill) {
+                t[0] += t[r];
+                t[r] = 0;
+            }
+        }
     }
 
     // =====================================================================
@@ -785,6 +800,19 @@ contract DeepWoodV4 {
             revert TierLocked();
         }
 
+        // The other half of the tool/skill interlock: you cannot hold a tool
+        // you have not earned the skill for. Tier N needs skill N-1.
+        //
+        // This is not decoration. Tier 3+ REPAIRS need the tier's own rarer
+        // gems (repairNeeds(3) = [6Q, 5A, 3S]), and those are only mineable at
+        // skill 2+. A player holding Iron at skill 0 could not mine Sapphire,
+        // could not repair, and could not upgrade (buyTool requires a BROKEN
+        // tool) -- a permanent dead end. Gating the purchase means every tool
+        // a player can legally hold is one they can keep running.
+        //
+        // It also enforces the ladder literally: skill first, then the tool.
+        if (held.tier != 0 && skillOf[msg.sender] < tier - 1) revert TierLocked();
+
         // An upgrade REPLACES the tool, so it is only allowed on a broken one.
         // Upgrading a working tool would let a player abandon the durability
         // ladder they are supposed to climb -- use the tool up first. Repair
@@ -895,10 +923,40 @@ contract DeepWoodV4 {
         emit ToolRepaired(msg.sender, held.tier, burned);
     }
 
+    /// @notice Quartz burned to reach `targetSkill`. 200 * targetSkill.
+    /// @dev Was 500/level (5,000 to reach skill 4). At the honest phase rates
+    ///      that is ~4,400 hunts, and because a skill level DILUTES quartz (it
+    ///      unlocks a rarer gem, taking weight off the quartz band) the last
+    ///      levels are the slowest. 200/level brings full unlock to ~1,760
+    ///      hunts with break-even around skill 3.
+    function skillCost(uint8 targetSkill) public pure returns (uint256) {
+        return 200 * uint256(targetSkill);
+    }
+
+    /// @notice One skill level per tool tier. You may only raise skill as far
+    ///         as the tool you are holding, so a Wood hunter cannot buy their
+    ///         way to Diamond on the entry tool.
+    /// @dev This is half of the tool/skill interlock. The other half is
+    ///      buyTool requiring skillOf >= tier-1. Together, a player holding
+    ///      tier T always sits at skill T-1 or T.
+    ///
+    ///      A skill level is also INERT until the matching tool exists: skill
+    ///      1 unlocks Amber, but a Wood tool's table is 100% Quartz, so a Wood
+    ///      hunter who buys skill 1 sees no change until they upgrade to
+    ///      Bronze. That is the intended reading -- the skill level is the
+    ///      PERMISSION to mine the next rarity, and the tool is the ABILITY.
     function upgradeSkill(uint8 targetSkill) external whenNotPaused {
         uint8 cur = skillOf[msg.sender];
         if (targetSkill <= cur || targetSkill > 4) revert TierLocked();
-        uint256 cost = 500 * uint256(targetSkill);
+
+        // One level per tier: you must hold the tool that mines the rarity you
+        // are unlocking. Without this a tier-1 player could buy skill 4 and
+        // then take a Gold tool straight to Diamond, skipping the ladder.
+        uint8 heldTier = _held[msg.sender].tier;
+        if (heldTier == 0) revert ToolNotOwned();
+        if (targetSkill > heldTier) revert TierLocked();
+
+        uint256 cost = skillCost(targetSkill);
         uint256 burn = _burn(msg.sender, cost);
         skillOf[msg.sender] = targetSkill;
 
@@ -908,15 +966,19 @@ contract DeepWoodV4 {
         uint8 base = config.baseSlots + _slotBonus[msg.sender];
         if (newSlots > base) _slotBonus[msg.sender] = newSlots - config.baseSlots;
 
-        // Unlock rarities findable at this skill. The mapping is explicit
-        // rather than computed, because the enum indices and the skill
-        // levels only line up if you offset correctly -- the earlier
-        // `Rarity(s - 1)` loop meant skill 3 unlocked Rare but never Epic.
+        // Unlock the rarity this level is named for. Skill N -> Rarity(N):
+        // 1=Amber, 2=Sapphire, 3=Ruby, 4=Diamond. The mapping is explicit
+        // rather than computed, because the enum indices and the skill levels
+        // only line up if you offset correctly -- an earlier `Rarity(s - 1)`
+        // loop meant skill 3 unlocked Rare but never Epic.
+        //
+        // Quartz and Amber are always unlocked: they are the free baseline, so
+        // a brand-new player can always complete a hunt.
+        rarityUnlocked[msg.sender][Rarity.Common] = true;
+        rarityUnlocked[msg.sender][Rarity.Uncommon] = true;
         if (targetSkill >= 2) rarityUnlocked[msg.sender][Rarity.Rare] = true;
         if (targetSkill >= 3) rarityUnlocked[msg.sender][Rarity.Epic] = true;
         if (targetSkill >= 4) rarityUnlocked[msg.sender][Rarity.Legendary] = true;
-        rarityUnlocked[msg.sender][Rarity.Common] = true;
-        rarityUnlocked[msg.sender][Rarity.Uncommon] = true;
 
         emit SkillUpgraded(msg.sender, cost, burn);
     }
@@ -1857,6 +1919,19 @@ contract DeepWoodV4 {
                 p.huntsThisSeason = uint64(abi.decode(data, (uint256)));
             }
 
+            // Carry the skill level across. Without this a migrated player
+            // keeps their tool but lands at skill 0, which violates the
+            // tool/skill interlock and would strand them exactly like the
+            // Iron-at-skill-0 dead end the interlock exists to prevent.
+            (success, data) = source.staticcall(
+                abi.encodeWithSignature("skillOf(address)", player)
+            );
+            if (success && data.length >= 32) {
+                uint8 srcSkill = uint8(abi.decode(data, (uint256)));
+                if (srcSkill > 4) srcSkill = 4;
+                if (srcSkill > skillOf[player]) skillOf[player] = srcSkill;
+            }
+
             // Read gem satchel from source
             for (uint8 r = 0; r < 5; r++) {
                 (success, data) = source.staticcall(
@@ -1927,7 +2002,6 @@ contract DeepWoodV4 {
     /// satchel copy, and a contract already deployed cannot be taught a new
     /// behaviour. Any player whose V3 satchel was lost in that migration can be
     /// credited exactly what V3 still holds for them.
-    ///
     /// Deliberately additive and never subtractive: it cannot remove a gem a
     /// player legitimately earned on V4, so a mistaken call can only over-credit,
     /// never confiscate. Events make every call auditable.
@@ -1937,6 +2011,33 @@ contract DeepWoodV4 {
         _p[player].gems[Rarity(rarity)] += amount;
         _p[player].totalGemsEarned += amount;
         emit GemsGranted(player, Rarity(rarity), amount);
+    }
+
+    /// @notice Bring a player's skill up to what their held tool implies.
+    ///
+    /// The tool/skill interlock requires skill >= tier-1. Players who acquired a
+    /// tool BEFORE the interlock shipped sit below it (a tier-2 holder at skill
+    /// 0, say), which under the new rules leaves them unable to climb. A
+    /// deployed contract cannot be taught a new invariant retroactively, so
+    /// this raises them to the floor the interlock demands.
+    ///
+    /// Deliberately raise-only: it can never LOWER a skill, so it cannot
+    /// confiscate a level anyone bought. Level 1 is included because
+    /// maxFindableRarity treats below-2 as the Amber ceiling, making level 1
+    /// inert -- a player parked at 0 gains nothing from being raised to 1, but
+    /// a tier-2 holder needs it for the interlock to read correctly.
+    function syncSkill(address player) external onlyOwner {
+        uint8 tier = _held[player].tier;
+        if (tier == 0) revert ToolNotOwned();
+        uint8 floorSkill = tier > 1 ? tier - 1 : 1;
+        if (skillOf[player] >= floorSkill) return;
+        skillOf[player] = floorSkill;
+        rarityUnlocked[player][Rarity.Common] = true;
+        rarityUnlocked[player][Rarity.Uncommon] = true;
+        if (floorSkill >= 2) rarityUnlocked[player][Rarity.Rare] = true;
+        if (floorSkill >= 3) rarityUnlocked[player][Rarity.Epic] = true;
+        if (floorSkill >= 4) rarityUnlocked[player][Rarity.Legendary] = true;
+        emit SkillSynced(player, floorSkill);
     }
 
     /// @notice Mark migration as completed (no more migrations allowed)
