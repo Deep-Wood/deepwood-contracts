@@ -219,27 +219,43 @@ contract TokenRailTest is Test {
         dw.buyToolWithToken(3, gold, block.timestamp + 30, 1);
     }
 
-    /// @notice FINDING, pinned so it cannot change silently: a player holding
-    ///         NO tool can buy ANY tier as their first purchase, including
-    ///         tier 5. The guard is `held.tier != 0 && tier != held.tier + 1`,
-    ///         so it short-circuits on the first buy and the ladder is never
-    ///         entered.
-    ///
-    ///         This matters economically: climbing 1->5 costs
-    ///         0.005+0.052+0.184+0.862+2.300 = 3.403 ETH, but a direct tier-5
-    ///         first buy costs 2.300 ETH. That skips ~1.1 ETH of ladder spend
-    ///         and every repair decision the ladder exists to force.
-    ///
-    ///         This test asserts the CURRENT behaviour, not the desired one.
-    ///         The fix is a product decision (require tier == 1 when
-    ///         held.tier == 0) and is deliberately NOT applied here.
-    function test_FirstBuyCanCurrentlyBeAnyTier() public {
+    /// @notice A first purchase must be tier 1. The old guard
+    ///         `held.tier != 0 && tier != held.tier + 1` short-circuited on a
+    ///         player holding nothing, so a first buy could be ANY tier -- tier 5
+    ///         for 2.3 ETH instead of climbing 1->5 for 3.403 ETH, skipping
+    ///         ~1.1 ETH of ladder spend and every repair decision the ladder
+    ///         exists to force. Now enforced on both the ETH and token paths.
+    function test_FirstBuyMustBeTierOne() public {
         uint256 tier5 = _quoteTokenCost(5);
         vm.prank(alice);
+        vm.expectRevert(DeepWoodV4.TierLocked.selector);
         dw.buyToolWithToken(5, tier5, block.timestamp + 30, 0);
 
+        // Tier 1 is accepted.
+        uint256 tier1 = _quoteTokenCost(1);
+        vm.prank(alice);
+        dw.buyToolWithToken(1, tier1, block.timestamp + 30, 0);
         (uint8 tier,,) = dw.toolOf(alice);
-        assertEq(tier, 5, "first buy reached tier 5 directly -- the documented gap");
+        assertEq(tier, 1, "first buy is tier 1");
+    }
+
+    /// @notice The same ladder on the ETH path: a first `buyTool` must be tier
+    ///         1. There was no V4 ETH buy test at all, so this guard was
+    ///         untested before the fix.
+    function test_EthFirstBuyMustBeTierOne() public {
+        vm.deal(alice, 100 ether);
+        uint256 goldCost = dw.toolCost(5);
+        vm.prank(alice);
+        vm.expectRevert(DeepWoodV4.TierLocked.selector);
+        dw.buyTool{ value: goldCost }(5);
+
+        // startPrank, not prank: a single prank is consumed by the view call
+        // after the buy, which then made the buy mint for the test contract.
+        vm.startPrank(alice);
+        dw.buyTool{ value: dw.toolCost(1) }(1);
+        (uint8 tier,,) = dw.toolOf(alice);
+        vm.stopPrank();
+        assertEq(tier, 1, "ETH first buy is tier 1");
     }
 
     // ---- redeeming gems ---------------------------------------------------

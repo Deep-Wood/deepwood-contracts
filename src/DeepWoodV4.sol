@@ -760,7 +760,18 @@ contract DeepWoodV4 {
         // First purchase buys tier 1. After that only the NEXT tier: buying
         // straight to Gold would skip every repair decision in between, which
         // is the loop the economy is built on (SPEC §9).
-        if (held.tier != 0 && tier != held.tier + 1) revert TierLocked();
+        //
+        // The first-buy case is enforced, not just the upgrade case. The old
+        // guard `held.tier != 0 && tier != held.tier + 1` short-circuited on a
+        // player holding nothing, so a first purchase could be ANY tier --
+        // tier 5 for 2.3 ETH instead of climbing 1->5 for 3.403 ETH, skipping
+        // ~1.1 ETH of ladder spend and every repair decision the ladder
+        // exists to force.
+        if (held.tier == 0) {
+            if (tier != 1) revert TierLocked();
+        } else if (tier != held.tier + 1) {
+            revert TierLocked();
+        }
 
         if (msg.value > cost) {
             // Overpayment is refunded, not absorbed. Absorbing it would mean a
@@ -1689,7 +1700,15 @@ contract DeepWoodV4 {
 
         // Update player state (same as buyTool)
         Tool storage held = _held[msg.sender];
-        if (held.tier != 0 && tier != held.tier + 1) revert TierLocked();
+        // Same ladder as the ETH path: a first purchase must be tier 1, then
+        // only the next tier up. The old guard short-circuited on `held.tier
+        // != 0`, so a first token buy could jump straight to tier 5 at the 10%
+        // discount -- skipping the whole ladder AND its full price.
+        if (held.tier == 0) {
+            if (tier != 1) revert TierLocked();
+        } else if (tier != held.tier + 1) {
+            revert TierLocked();
+        }
 
         uint64 durability = uint64(durabilityOf(tier));
         held.tier = tier;
