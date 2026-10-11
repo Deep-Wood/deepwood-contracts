@@ -1821,16 +1821,27 @@ contract DeepWoodV4 {
         Player storage p = _p[player];
 
         if (source != address(0) && source.code.length > 0) {
-            // Read tool state from source
+            // Read tool state from source. Copy whenever a tool exists
+            // (tier > 0), even if it wasn't equipped on the source -- the
+            // tool is the player's property, equipping it here is the
+            // reasonable default.
             (bool success, bytes memory data) = source.staticcall(
                 abi.encodeWithSignature("toolOf(address)", player)
             );
             if (success && data.length >= 96) {
                 (uint8 tier, uint64 durability, bool active) = abi.decode(data, (uint8, uint64, bool));
-                if (active) {
+                if (tier > 0) {
                     _held[player] = Tool({ tier: tier, durability: durability, active: true });
-                    p.huntsThisSeason = uint64(tier);
                 }
+            }
+
+            // Preserve the hunt index so future hunts continue the player's
+            // sequence instead of replaying hunts the source already settled.
+            (success, data) = source.staticcall(
+                abi.encodeWithSignature("huntIndexOf(address)", player)
+            );
+            if (success && data.length >= 32) {
+                p.huntsThisSeason = uint64(abi.decode(data, (uint256)));
             }
 
             // Read gem satchel from source
