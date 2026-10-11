@@ -2,7 +2,7 @@
 pragma solidity ^0.8.35;
 
 import {Test} from "forge-std/Test.sol";
-import {DeepWoodV4} from "../src/DeepWoodV4.sol";
+import {DeepWoodV5} from "../src/DeepWoodV5.sol";
 
 /// @notice The tool/skill interlock and the rarity gate (SPEC section 2).
 ///
@@ -23,7 +23,7 @@ import {DeepWoodV4} from "../src/DeepWoodV4.sol";
 /// player holds that tier -- and every tool a player can hold is repairable,
 /// because tier N's repair needs exactly the gems skill N-1 unlocks.
 contract SkillGateTest is Test {
-    DeepWoodV4 dw;
+    DeepWoodV5 dw;
 
     address internal constant TREASURY = address(0xBEEF);
     address internal constant HUNTER = address(0xF00D);
@@ -34,7 +34,7 @@ contract SkillGateTest is Test {
     address internal alice = address(0xA11CE);
 
     function setUp() public {
-        dw = new DeepWoodV4(TREASURY, HUNTER, POOL_MANAGER, POOL_ID, address(0));
+        dw = new DeepWoodV5(TREASURY, HUNTER, POOL_MANAGER, POOL_ID, address(0));
         vm.prank(HUNTER);
         dw.commitSeed(SEED);
         vm.deal(alice, 100 ether);
@@ -115,11 +115,11 @@ contract SkillGateTest is Test {
         assertEq(dw.skillOf(alice), 1);
 
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.TierLocked.selector);
+        vm.expectRevert(DeepWoodV5.TierLocked.selector);
         dw.upgradeSkill(2);
 
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.TierLocked.selector);
+        vm.expectRevert(DeepWoodV5.TierLocked.selector);
         dw.upgradeSkill(4);
     }
 
@@ -127,7 +127,7 @@ contract SkillGateTest is Test {
     function test_SkillRequiresATool() public {
         _grantQuartz(alice, 6_000);
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.ToolNotOwned.selector);
+        vm.expectRevert(DeepWoodV5.ToolNotOwned.selector);
         dw.upgradeSkill(1);
     }
 
@@ -140,7 +140,7 @@ contract SkillGateTest is Test {
 
         uint256 cost = dw.toolCost(2);
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.TierLocked.selector);
+        vm.expectRevert(DeepWoodV5.TierLocked.selector);
         dw.buyTool{value: cost}(2);
 
         vm.prank(alice);
@@ -172,7 +172,7 @@ contract SkillGateTest is Test {
         dw.upgradeSkill(1);
 
         // Skill 1 says Amber is unlocked...
-        assertTrue(dw.rarityUnlocked(alice, DeepWoodV4.Rarity.Uncommon), "skill 1 unlocks amber");
+        assertTrue(dw.rarityUnlocked(alice, DeepWoodV5.Rarity.Uncommon), "skill 1 unlocks amber");
 
         // ...but Wood's table is quartz-only, so nothing changes in practice.
         uint256[5] memory wood = dw.dropTable(1, dw.skillOf(alice));
@@ -272,7 +272,7 @@ contract SkillGateTest is Test {
 
         dw.syncSkill(alice);
         assertEq(dw.skillOf(alice), 1, "raised to the tier-1 floor");
-        assertTrue(dw.rarityUnlocked(alice, DeepWoodV4.Rarity.Uncommon), "amber unlocked");
+        assertTrue(dw.rarityUnlocked(alice, DeepWoodV5.Rarity.Uncommon), "amber unlocked");
 
         // Raise-only: calling again must not lower anything.
         dw.syncSkill(alice);

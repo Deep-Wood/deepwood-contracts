@@ -2,7 +2,7 @@
 pragma solidity ^0.8.35;
 
 import {Test} from "forge-std/Test.sol";
-import {DeepWoodV4} from "../src/DeepWoodV4.sol";
+import {DeepWoodV5} from "../src/DeepWoodV5.sol";
 
 /// @notice Plays the ladder END TO END on the real contract and reports what it
 ///         actually costs in hunts and ETH.
@@ -16,7 +16,7 @@ import {DeepWoodV4} from "../src/DeepWoodV4.sol";
 ///
 /// Run with: forge test --match-contract SkillEconomySim -vv
 contract SkillEconomySim is Test {
-    DeepWoodV4 dw;
+    DeepWoodV5 dw;
 
     address internal constant TREASURY = address(0xBEEF);
     address internal constant HUNTER = address(0xF00D);
@@ -32,7 +32,7 @@ contract SkillEconomySim is Test {
     ];
 
     function setUp() public {
-        dw = new DeepWoodV4(TREASURY, HUNTER, POOL_MANAGER, POOL_ID, address(0));
+        dw = new DeepWoodV5(TREASURY, HUNTER, POOL_MANAGER, POOL_ID, address(0));
         vm.prank(HUNTER);
         dw.commitSeed(SEED);
         vm.deal(alice, 500 ether);
@@ -54,7 +54,7 @@ contract SkillEconomySim is Test {
         internal returns (uint256 hunts, uint256 mined)
     {
         uint256 guard = 0;
-        while (dw.gemsOf(who, DeepWoodV4.Rarity.Common) < target) {
+        while (dw.gemsOf(who, DeepWoodV5.Rarity.Common) < target) {
             if (guard++ > 20_000) revert("farm did not converge");
             (uint8 t, uint64 dur,) = dw.toolOf(who);
             require(t == tier, "tier drifted");
@@ -91,10 +91,10 @@ contract SkillEconomySim is Test {
             totalMined += m;
 
             // Buy the skill (only possible up to the tier held).
-            uint256 before = dw.gemsOf(alice, DeepWoodV4.Rarity.Common);
+            uint256 before = dw.gemsOf(alice, DeepWoodV5.Rarity.Common);
             vm.prank(alice);
             dw.upgradeSkill(tier);
-            totalSkillBurn += before - dw.gemsOf(alice, DeepWoodV4.Rarity.Common);
+            totalSkillBurn += before - dw.gemsOf(alice, DeepWoodV5.Rarity.Common);
 
             emit log_named_uint("--- after skill", tier);
             emit log_named_uint("  cumulative hunts", totalHunts);

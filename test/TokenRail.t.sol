@@ -2,7 +2,7 @@
 pragma solidity ^0.8.35;
 
 import {Test} from "forge-std/Test.sol";
-import {DeepWoodV4} from "../src/DeepWoodV4.sol";
+import {DeepWoodV5} from "../src/DeepWoodV5.sol";
 
 /// @dev Minimal 18-decimal ERC20 with mint and a controllable `decimals`, so a
 ///      test can prove the contract refuses a non-18-decimal token.
@@ -84,7 +84,7 @@ contract TokenRailTest is Test {
 
     MockToken token;
     MockPoolManager poolManager;
-    DeepWoodV4 dw;
+    DeepWoodV5 dw;
 
     address owner = address(this);
     address treasury = makeAddr("treasury");
@@ -98,7 +98,7 @@ contract TokenRailTest is Test {
     function setUp() public {
         token = new MockToken(18);
         poolManager = new MockPoolManager();
-        dw = new DeepWoodV4(treasury, hunter, address(poolManager), POOL_ID, address(0));
+        dw = new DeepWoodV5(treasury, hunter, address(poolManager), POOL_ID, address(0));
 
         // The contract reads slot0 as keccak256(POOL_ID, 6).
         bytes32 stateSlot = keccak256(abi.encodePacked(POOL_ID, bytes32(uint256(6))));
@@ -184,7 +184,7 @@ contract TokenRailTest is Test {
         // expectation and the test passes for the wrong reason.
         uint256 quoted2 = _quoteTokenCost(2);
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.BadNonce.selector);
+        vm.expectRevert(DeepWoodV5.BadNonce.selector);
         dw.buyToolWithToken(2, quoted2, block.timestamp + 30, 0);
     }
 
@@ -193,7 +193,7 @@ contract TokenRailTest is Test {
         uint256 quoted = _quoteTokenCost(1);
         vm.warp(1000);
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.QuoteStale.selector);
+        vm.expectRevert(DeepWoodV5.QuoteStale.selector);
         dw.buyToolWithToken(1, quoted, 999, 0);
     }
 
@@ -201,7 +201,7 @@ contract TokenRailTest is Test {
     function test_TokenBuyRejectsAnOffMarketQuote() public {
         uint256 quoted = _quoteTokenCost(1);
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.QuoteStale.selector);
+        vm.expectRevert(DeepWoodV5.QuoteStale.selector);
         dw.buyToolWithToken(1, quoted / 2, block.timestamp + 30, 0);
     }
 
@@ -215,7 +215,7 @@ contract TokenRailTest is Test {
         // Wood -> Gold must be refused; only the next tier is buyable.
         uint256 gold = _quoteTokenCost(3);
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.TierLocked.selector);
+        vm.expectRevert(DeepWoodV5.TierLocked.selector);
         dw.buyToolWithToken(3, gold, block.timestamp + 30, 1);
     }
 
@@ -228,7 +228,7 @@ contract TokenRailTest is Test {
     function test_FirstBuyMustBeTierOne() public {
         uint256 tier5 = _quoteTokenCost(5);
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.TierLocked.selector);
+        vm.expectRevert(DeepWoodV5.TierLocked.selector);
         dw.buyToolWithToken(5, tier5, block.timestamp + 30, 0);
 
         // Tier 1 is accepted.
@@ -254,7 +254,7 @@ contract TokenRailTest is Test {
         // Try to upgrade to tier 2 while the tool still has durability.
         uint256 tier2 = _quoteTokenCost(2);
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.NotBroken.selector);
+        vm.expectRevert(DeepWoodV5.NotBroken.selector);
         dw.buyToolWithToken(2, tier2, block.timestamp + 30, 1);
     }
 
@@ -265,7 +265,7 @@ contract TokenRailTest is Test {
         vm.deal(alice, 100 ether);
         uint256 goldCost = dw.toolCost(5);
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.TierLocked.selector);
+        vm.expectRevert(DeepWoodV5.TierLocked.selector);
         dw.buyTool{ value: goldCost }(5);
 
         // startPrank, not prank: a single prank is consumed by the view call
@@ -284,13 +284,13 @@ contract TokenRailTest is Test {
     ///         would have been ~1e14x too small.
     function test_RedeemPaysTokensAtTheLivePrice() public {
         _graduateAndFund();
-        _giveGems(alice, DeepWoodV4.Rarity.Common, 1000);
+        _giveGems(alice, DeepWoodV5.Rarity.Common, 1000);
 
-        (uint256 quotedTokens,) = dw.redeemQuoteToken(DeepWoodV4.Rarity.Common, 1000);
+        (uint256 quotedTokens,) = dw.redeemQuoteToken(DeepWoodV5.Rarity.Common, 1000);
         uint256 before = token.balanceOf(alice);
 
         vm.prank(alice);
-        dw.redeemGems(DeepWoodV4.Rarity.Common, 1000);
+        dw.redeemGems(DeepWoodV5.Rarity.Common, 1000);
 
         assertEq(token.balanceOf(alice) - before, quotedTokens, "paid exactly the quote");
         // 1000 Quartz @ 0.00005 ETH face = 0.05 ETH, 90% = 0.045 ETH.
@@ -301,12 +301,12 @@ contract TokenRailTest is Test {
     /// @notice The quote view must never disagree with what the contract pays.
     function test_RedeemQuoteMatchesWhatIsActuallyPaid() public {
         _graduateAndFund();
-        _giveGems(alice, DeepWoodV4.Rarity.Uncommon, 50);
+        _giveGems(alice, DeepWoodV5.Rarity.Uncommon, 50);
 
-        (uint256 quoted,) = dw.redeemQuoteToken(DeepWoodV4.Rarity.Uncommon, 50);
+        (uint256 quoted,) = dw.redeemQuoteToken(DeepWoodV5.Rarity.Uncommon, 50);
         uint256 before = token.balanceOf(alice);
         vm.prank(alice);
-        dw.redeemGems(DeepWoodV4.Rarity.Uncommon, 50);
+        dw.redeemGems(DeepWoodV5.Rarity.Uncommon, 50);
 
         assertEq(token.balanceOf(alice) - before, quoted);
     }
@@ -320,7 +320,7 @@ contract TokenRailTest is Test {
         dw.buyToolWithToken(1, quoted, block.timestamp + 30, 0);
 
         _graduateAndFund();
-        _giveGems(alice, DeepWoodV4.Rarity.Common, 500);
+        _giveGems(alice, DeepWoodV5.Rarity.Common, 500);
 
         // Capture AFTER funding -- fundToken also credits the backing, so a
         // baseline taken right after the buy would understate it and the
@@ -329,9 +329,9 @@ contract TokenRailTest is Test {
         assertGt(backingBefore, 0, "backing is established");
         assertEq(backingBefore, token.balanceOf(address(dw)), "tracked == held before");
 
-        (uint256 payoutTokens,) = dw.redeemQuoteToken(DeepWoodV4.Rarity.Common, 500);
+        (uint256 payoutTokens,) = dw.redeemQuoteToken(DeepWoodV5.Rarity.Common, 500);
         vm.prank(alice);
-        dw.redeemGems(DeepWoodV4.Rarity.Common, 500);
+        dw.redeemGems(DeepWoodV5.Rarity.Common, 500);
 
         assertEq(dw.tokenBacking(), backingBefore - payoutTokens, "backing drawn down");
         assertEq(dw.tokenBacking(), token.balanceOf(address(dw)), "tracked == held after");
@@ -340,31 +340,54 @@ contract TokenRailTest is Test {
     /// @notice Gems are burned on redemption -- you cannot redeem twice.
     function test_RedeemBurnsTheGems() public {
         _graduateAndFund();
-        _giveGems(alice, DeepWoodV4.Rarity.Common, 300);
+        _giveGems(alice, DeepWoodV5.Rarity.Common, 300);
 
         vm.prank(alice);
-        dw.redeemGems(DeepWoodV4.Rarity.Common, 300);
+        dw.redeemGems(DeepWoodV5.Rarity.Common, 300);
 
-        assertEq(dw.gemsOf(alice, DeepWoodV4.Rarity.Common), 0, "gems burned");
+        assertEq(dw.gemsOf(alice, DeepWoodV5.Rarity.Common), 0, "gems burned");
 
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.InsufficientGems.selector);
-        dw.redeemGems(DeepWoodV4.Rarity.Common, 1);
+        vm.expectRevert(DeepWoodV5.InsufficientGems.selector);
+        dw.redeemGems(DeepWoodV5.Rarity.Common, 1);
     }
 
     /// @notice The rail stays locked until the grace window has passed.
     function test_RedeemIsLockedBeforeTheGraceWindow() public {
-        // Graduate but do NOT warp: still inside the 1-day grace, so
+        // Graduate but do NOT warp: still inside the 3-hour grace, so
         // tokenRedemptionActive() is false.
         vm.prank(hunter);
         dw.markGraduated();
         token.mint(address(dw), 1_000_000 ether);
-        _giveGems(alice, DeepWoodV4.Rarity.Common, 1000);
+        _giveGems(alice, DeepWoodV5.Rarity.Common, 1000);
         assertFalse(dw.tokenRedemptionActive());
 
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.TokenRailLocked.selector);
-        dw.redeemGems(DeepWoodV4.Rarity.Common, 1000);
+        vm.expectRevert(DeepWoodV5.TokenRailLocked.selector);
+        dw.redeemGems(DeepWoodV5.Rarity.Common, 1000);
+    }
+
+    /// @notice The grace window is 3 hours (V5), not the 1 day of V3/V4.
+    ///         Asserted explicitly: the earlier version of this test warped
+    ///         `1 days` and would have passed against a 1-day config, so it
+    ///         could not detect the change it was supposed to cover.
+    function test_GraceWindowIsThreeHours() public {
+        (,,,, uint64 grace,,) = dw.getConfig();
+        assertEq(grace, 3 hours, "V5 ships a 3-hour grace window");
+
+        vm.prank(hunter);
+        dw.markGraduated();
+        token.mint(address(dw), 1_000_000 ether);
+        _giveGems(alice, DeepWoodV5.Rarity.Common, 1000);
+
+        // One second short: still locked.
+        uint64 graduatedAt = dw.graduatedAt();
+        vm.warp(uint256(graduatedAt) + 3 hours - 1);
+        assertFalse(dw.tokenRedemptionActive(), "locked one second before the end");
+
+        // Exactly at the boundary: open.
+        vm.warp(uint256(graduatedAt) + 3 hours);
+        assertTrue(dw.tokenRedemptionActive(), "open exactly at 3 hours");
     }
 
     /// @notice The moment the grace window elapses, redemption opens. The
@@ -374,29 +397,29 @@ contract TokenRailTest is Test {
         vm.prank(hunter);
         dw.markGraduated();
         token.mint(address(dw), 1_000_000 ether);
-        _giveGems(alice, DeepWoodV4.Rarity.Common, 1000);
+        _giveGems(alice, DeepWoodV5.Rarity.Common, 1000);
 
-        (uint64 graduatedAt,) = (dw.graduatedAt(), 0);
-        vm.warp(uint256(graduatedAt) + 1 days);
+        uint64 graduatedAt = dw.graduatedAt();
+        vm.warp(uint256(graduatedAt) + 3 hours);
         assertTrue(dw.tokenRedemptionActive(), "active at the boundary");
 
         vm.prank(alice);
-        dw.redeemGems(DeepWoodV4.Rarity.Common, 1000);
-        assertEq(dw.gemsOf(alice, DeepWoodV4.Rarity.Common), 0);
+        dw.redeemGems(DeepWoodV5.Rarity.Common, 1000);
+        assertEq(dw.gemsOf(alice, DeepWoodV5.Rarity.Common), 0);
     }
 
     /// @notice A contract with no tokens cannot pay, and must say so rather
     ///         than sending a zero-value transfer.
     function test_RedeemRevertsWhenTheContractIsUnfunded() public {
         _graduateAndFund();
-        _giveGems(alice, DeepWoodV4.Rarity.Common, 1000);
+        _giveGems(alice, DeepWoodV5.Rarity.Common, 1000);
         // Drain the tracked backing through the sanctioned path.
         uint256 bal = dw.tokenBacking();
         dw.emergencyWithdraw(address(token), bal, owner);
 
         vm.prank(alice);
-        vm.expectRevert(DeepWoodV4.InsufficientTokenBalance.selector);
-        dw.redeemGems(DeepWoodV4.Rarity.Common, 1000);
+        vm.expectRevert(DeepWoodV5.InsufficientTokenBalance.selector);
+        dw.redeemGems(DeepWoodV5.Rarity.Common, 1000);
     }
 
     /// @notice The owner cannot rug the redemption backing. Those tokens are
@@ -406,7 +429,7 @@ contract TokenRailTest is Test {
         uint256 backing = dw.tokenBacking();
         assertGt(backing, 0);
 
-        vm.expectRevert(DeepWoodV4.InsufficientTokenBalance.selector);
+        vm.expectRevert(DeepWoodV5.InsufficientTokenBalance.selector);
         dw.emergencyWithdraw(address(token), backing + 1, owner);
     }
 
@@ -414,11 +437,11 @@ contract TokenRailTest is Test {
     ///         justify the gas is a griefing vector, not a rounding detail.
     function test_RedeemRefusesBelowTheFloor() public {
         _graduateAndFund();
-        _giveGems(alice, DeepWoodV4.Rarity.Common, 1);
+        _giveGems(alice, DeepWoodV5.Rarity.Common, 1);
 
         vm.prank(alice);
         vm.expectRevert();
-        dw.redeemGems(DeepWoodV4.Rarity.Common, 1);
+        dw.redeemGems(DeepWoodV5.Rarity.Common, 1);
     }
 
     // ---- the loop the rail must not open ----------------------------------
@@ -443,14 +466,14 @@ contract TokenRailTest is Test {
         uint256 spentOnTool = tokensBefore - token.balanceOf(alice);
 
         // Redeem 1000 Quartz -- what the tool's 20 hunts could plausibly yield.
-        _giveGems(alice, DeepWoodV4.Rarity.Common, 1000);
-        (uint256 back,) = dw.redeemQuoteToken(DeepWoodV4.Rarity.Common, 1000);
+        _giveGems(alice, DeepWoodV5.Rarity.Common, 1000);
+        (uint256 back,) = dw.redeemQuoteToken(DeepWoodV5.Rarity.Common, 1000);
 
         // 0.045 ETH of tokens back vs 0.0045 ETH spent: the loop is only
         // profitable because the GEMS are free, not because of the discount.
         // Assert the discount/spread arithmetic itself is 10% each way.
         assertEq(spentOnTool, (dw.toolCost(1) * 1e18) / dw.getEthPerToken() * 9000 / 10_000);
-        assertEq(back, (1000 * dw.priceOf(DeepWoodV4.Rarity.Common) * 9000) / 10_000 * 1e18 / dw.getEthPerToken());
+        assertEq(back, (1000 * dw.priceOf(DeepWoodV5.Rarity.Common) * 9000) / 10_000 * 1e18 / dw.getEthPerToken());
     }
 
     // ---- helpers ----------------------------------------------------------
@@ -476,7 +499,7 @@ contract TokenRailTest is Test {
     }
 
     /// @dev Hand `player` gems without going through a hunt roll.
-    function _giveGems(address player, DeepWoodV4.Rarity rarity, uint256 count) internal {
+    function _giveGems(address player, DeepWoodV5.Rarity rarity, uint256 count) internal {
         dw.grantGems(player, uint8(rarity), count);
     }
 }
