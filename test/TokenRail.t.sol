@@ -239,7 +239,26 @@ contract TokenRailTest is Test {
         assertEq(tier, 1, "first buy is tier 1");
     }
 
-    /// @notice The same ladder on the ETH path: a first `buyTool` must be tier
+    /// @notice An upgrade replaces the tool, so it must only work on a broken
+    ///         one. Upgrading a working tool would let a player abandon the
+    ///         durability ladder they are supposed to climb.
+    function test_UpgradeIsRefusedOnAWorkingTool() public {
+        // Buy tier 1 with tokens -- tool is NOT broken (full durability).
+        uint256 quoted = _quoteTokenCost(1);
+        vm.prank(alice);
+        dw.buyToolWithToken(1, quoted, block.timestamp + 30, 0);
+        (uint8 tier, uint64 dur,) = dw.toolOf(alice);
+        assertEq(tier, 1);
+        assertGt(dur, 0, "tool is not broken");
+
+        // Try to upgrade to tier 2 while the tool still has durability.
+        uint256 tier2 = _quoteTokenCost(2);
+        vm.prank(alice);
+        vm.expectRevert(DeepWoodV4.NotBroken.selector);
+        dw.buyToolWithToken(2, tier2, block.timestamp + 30, 1);
+    }
+
+    /// @notice The same broken-only rule on the ETH path: a first `buyTool` must be tier
     ///         1. There was no V4 ETH buy test at all, so this guard was
     ///         untested before the fix.
     function test_EthFirstBuyMustBeTierOne() public {

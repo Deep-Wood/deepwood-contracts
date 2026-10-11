@@ -773,6 +773,12 @@ contract DeepWoodV4 {
             revert TierLocked();
         }
 
+        // An upgrade REPLACES the tool, so it is only allowed on a broken one.
+        // Upgrading a working tool would let a player abandon the durability
+        // ladder they are supposed to climb -- use the tool up first. Repair
+        // is the only sanctioned way back to a working state (SPEC §5).
+        if (held.durability != 0) revert NotBroken();
+
         if (msg.value > cost) {
             // Overpayment is refunded, not absorbed. Absorbing it would mean a
             // player who fat-fingered 0.1 instead of 0.005 silently funded the
@@ -1709,6 +1715,10 @@ contract DeepWoodV4 {
         } else if (tier != held.tier + 1) {
             revert TierLocked();
         }
+
+        // Same broken-only rule as the ETH path: an upgrade replaces the tool,
+        // so a working one must be used up first.
+        if (held.durability != 0) revert NotBroken();
 
         uint64 durability = uint64(durabilityOf(tier));
         held.tier = tier;
