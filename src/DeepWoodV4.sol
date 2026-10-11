@@ -562,11 +562,21 @@ contract DeepWoodV4 {
     /// @dev Tier 1 was [9000, 1000, 0, 0, 0] -- 10% Amber at the entry tool,
     ///      which contradicts "Amber unlocked by Bronze" and let a Wood player
     ///      roll the tier-2 gem. Amber now starts at Bronze.
-    function dropTable(uint8 toolTier) public pure returns (uint256[5] memory) {
+    /// @notice Gold without Skill 4 finds NO Diamond (SPEC §2).
+    /// @dev The gate lives HERE, in the roll, rather than only in
+    ///      maxFindableRarity. The cap check rejects a claim above the player's
+    ///      ceiling, but it does not stop a Gold table from ROLLING Diamond and
+    ///      then reverting the whole settlement -- the player would just see
+    ///      ResultMismatch/RarityLocked on a dig the contract itself produced.
+    ///      Substituting the table means an unskilled Gold hunt can never roll
+    ///      a gem it is not allowed to keep. Sums to 10,000 like every other
+    ///      row: the 200 Diamond weight is redistributed to Sapphire.
+    function dropTable(uint8 toolTier, uint8 skill) public pure returns (uint256[5] memory) {
         if (toolTier <= 1) return [uint256(10_000), 0, 0, 0, 0];
         if (toolTier == 2) return [uint256(6_000), 4_000, 0, 0, 0];
         if (toolTier == 3) return [uint256(4_500), 3_500, 2_000, 0, 0];
         if (toolTier == 4) return [uint256(3_500), 3_500, 2_400, 600, 0];
+        if (skill < 4) return [uint256(3_000), 3_000, 3_000, 1_000, 0];
         return [uint256(3_000), 3_000, 2_500, 1_300, 200]; // tier 5, max skill
     }
 
@@ -932,7 +942,7 @@ contract DeepWoodV4 {
         // Now derived from the table itself instead of hardcoded, so the two
         // cannot drift again. A rarity whose weight is 0 in this tier's table
         // is not findable, whatever any other code path believes.
-        uint256[5] memory table = dropTable(toolTier);
+        uint256[5] memory table = dropTable(toolTier, skillOf[who]);
         Rarity toolCap = Rarity.Common;
         for (uint256 r = 4; r >= 1; r--) {
             if (table[r] > 0) {
@@ -1012,7 +1022,7 @@ contract DeepWoodV4 {
                 _preroundPlayers.push(player);
             }
         }
-        (uint256[5] memory expected, uint256 expectedBest) = _rollHunt(current.seed, player, pp.huntsThisSeason, toolTier);
+        (uint256[5] memory expected, uint256 expectedBest) = _rollHunt(current.seed, player, pp.huntsThisSeason, toolTier, skillOf[player]);
         for (uint256 i = 0; i < 5; i++) {
             if (counts[i] != expected[i]) revert ResultMismatch();
         }
@@ -1101,7 +1111,7 @@ contract DeepWoodV4 {
                 // Scope-locals so the stack stays under 16: expected and
                 // expectedBest die at the close of this block.
                 (uint256[5] memory expected, uint256 expectedBest) =
-                    _rollHunt(current.seed, player, p.huntsThisSeason, toolTier);
+                    _rollHunt(current.seed, player, p.huntsThisSeason, toolTier, skillOf[player]);
                 for (uint256 i = 0; i < 5; i++) {
                     if (counts[k][i] != expected[i]) revert ResultMismatch();
                     if (expected[i] > 0 && Rarity(i) > cap) revert RarityLocked();
@@ -1230,13 +1240,16 @@ contract DeepWoodV4 {
     ///      toolTier is INSIDE the per-gem stream: without it a tier-1 and a
     ///      tier-2 roll at the same index share entropy and can return an
     ///      identical gem sequence.
-    function _rollHunt(bytes32 seed, address player, uint64 huntIndex, uint8 toolTier)
+    /// @param skill the player's skill level. Passed through to dropTable so a
+    ///        Gold hunt without Skill 4 rolls the Diamond-free row -- the same
+    ///        table maxFindableRarity caps against.
+    function _rollHunt(bytes32 seed, address player, uint64 huntIndex, uint8 toolTier, uint8 skill)
         internal
         pure
         returns (uint256[5] memory counts, uint256 bestSingleWei)
     {
         if (toolTier == 0 || toolTier > MAX_TIER) revert ToolOutOfRange();
-        uint256[5] memory table = dropTable(toolTier);
+        uint256[5] memory table = dropTable(toolTier, skill);
 
         bytes32 h = keccak256(abi.encodePacked(seed, bytes32(uint256(huntIndex)), _lowerHex(player)));
         // Roll ONE rarity per hunt, then multiply. Mixing rarities in a single
@@ -1268,7 +1281,7 @@ contract DeepWoodV4 {
     ///      is about to settle, so the two can never disagree on screen.
     function previewHunt(address player, uint8 toolTier) external view returns (uint256[5] memory counts, uint256 bestSingleWei) {
         if (!current.seedCommitted) revert SeedNotCommitted();
-        return _rollHunt(current.seed, player, _p[player].huntsThisSeason, toolTier);
+        return _rollHunt(current.seed, player, _p[player].huntsThisSeason, toolTier, skillOf[player]);
     }
 
     /// @notice The result of the hunt `offset` digs FROM NOW (0 = next dig).
@@ -1281,7 +1294,7 @@ contract DeepWoodV4 {
     ///      stale queue (someone settled mid-session elsewhere) reverts whole.
     function previewHuntAt(address player, uint8 toolTier, uint256 offset) external view returns (uint256[5] memory counts, uint256 bestSingleWei) {
         if (!current.seedCommitted) revert SeedNotCommitted();
-        return _rollHunt(current.seed, player, _p[player].huntsThisSeason + uint64(offset), toolTier);
+        return _rollHunt(current.seed, player, _p[player].huntsThisSeason + uint64(offset), toolTier, skillOf[player]);
     }
 
     /// @notice The committed seed for the current season.
